@@ -1,0 +1,55 @@
+cmake_minimum_required(VERSION 3.10)
+
+project(nyaio VERSION 0.0.0 LANGUAGES CXX)
+
+# Disable in-source build.
+if(${PROJECT_SOURCE_DIR} STREQUAL ${PROJECT_BINARY_DIR})
+    message(FATAL_ERROR "In-source build is not allowed.")
+endif()
+
+option(NYAIO_BUILD_SHARED_LIBS "Build nyaio as shared library. The CMake BUILD_SHARED_LIBS option does not affect this project." OFF)
+option(NYAIO_WARNINGS_AS_ERRORS "Treat warnings as errors when building nyaio." OFF)
+
+file(GLOB_RECURSE NYAIO_HEADER_FILES "include/nyaio/*.hpp")
+file(GLOB_RECURSE NYAIO_SOURCE_FILES "src/nyaio/*.cpp")
+
+if(NYAIO_BUILD_SHARED_LIBS)
+    add_library(nyaio SHARED ${NYAIO_HEADER_FILES} ${NYAIO_SOURCE_FILES})
+
+    # Options for shared library.
+    target_compile_definitions(nyaio PUBLIC "NYAIO_API=__attribute__((visibility(\"default\")))")
+    set_target_properties(
+        nyaio
+        PROPERTIES  POSITION_INDEPENDENT_CODE ON
+                    CXX_VISIBILITY_PRESET hidden
+    )
+else()
+    add_library(nyaio STATIC ${NYAIO_HEADER_FILES} ${NYAIO_SOURCE_FILES})
+    target_compile_definitions(nyaio PUBLIC "NYAIO_API=")
+endif()
+
+# This project uses some C++23 features.
+target_compile_features(nyaio PUBLIC cxx_std_23)
+
+# Set options for shared library.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(
+        nyaio
+        PRIVATE -Wall -Wextra -pedantic -Wshadow -Woverloaded-virtual -Wconversion
+    )
+
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        target_compile_options(nyaio PRIVATE -Wmost)
+    endif()
+
+    if(NYAIO_WARNINGS_AS_ERRORS)
+        target_compile_options(nyaio PRIVATE -Werror)
+    endif()
+endif()
+
+target_include_directories(
+    nyaio
+    PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+            $<INSTALL_INTERFACE:include>
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)

@@ -1,0 +1,22 @@
+---
+Checks: '
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  modernize-*,
+  -modernize-avoid-c-arrays,
+  -modernize-use-default-member-init,
+  cppcoreguidelines-explicit-virtual-functions,
+  performance-*,
+  -performance-no-int-to-ptr,
+  -performance-noexcept-move-constructor
+'
+WarningsAsErrors: '
+  clang-diagnostic-*,
+  clang-analyzer-*,
+  cppcoreguidelines-explicit-virtual-functions,
+  cppcoreguidelines-special-member-functions,
+  performance-*
+'
+FormatStyle: file
+HeaderFilterRegex: '(include|src)*\.(h|hpp)$'
+...
