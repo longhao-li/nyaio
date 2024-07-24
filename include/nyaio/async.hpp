@@ -1225,6 +1225,53 @@ public:
     static constexpr auto await_resume() noexcept -> void {}
 };
 
+/// @class schedule_awaitable
+/// @brief
+///   Awaitable object for scheduling a new task in current worker.
+template <class T>
+class [[nodiscard]] schedule_awaitable {
+public:
+    /// @brief
+    ///   Create a new awaitable for scheduling a new task.
+    /// @param t
+    ///   The task to be scheduled.
+    schedule_awaitable(task<T> &&t) noexcept : m_task(std::move(t)) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Get worker of this coroutine and schedule the new task.
+    /// @tparam Promise
+    ///   Type of promise of this coroutine.
+    /// @param coro
+    ///   Coroutine handle of this coroutine.
+    /// @return
+    ///   This method always returns @c false.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> bool {
+        auto &p      = static_cast<detail::promise_base &>(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(p.worker());
+
+        worker->schedule(std::move(m_task));
+        return false;
+    }
+
+    /// @brief
+    ///   Resume this coroutine from timeout. Do nothing.
+    static constexpr auto await_resume() noexcept -> void {}
+
+private:
+    task<T> m_task;
+};
+
 /// @class timeout_awaitable
 /// @brief
 ///   Awaitable object for timeout event. This awaitable suspends current coroutine for the
