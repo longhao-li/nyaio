@@ -1,11 +1,16 @@
 #include "nyaio/async.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <csignal>
 #include <system_error>
 
 #include <sys/mman.h>
+#include <sys/utsname.h>
 #include <unistd.h>
+
+using namespace nyaio;
+using namespace nyaio::detail;
 
 #ifndef __NR_io_uring_setup
 #    define __NR_io_uring_setup 425
@@ -272,4 +277,220 @@ auto nyaio::detail::io_uring::map_memory(io_uring_params &params) noexcept -> in
     }
 
     return 0;
+}
+
+/// @brief
+///   Create an unsigned int that represents a version number.
+/// @param major
+///   Major linux kernel version number.
+/// @param minor
+///   Minor linux kernel version number.
+/// @param patch
+///   Patch linux kernel version number.
+[[nodiscard]]
+static constexpr auto make_version(uint8_t major, uint8_t minor,
+                                   uint8_t patch) noexcept -> uint32_t {
+    return (static_cast<uint32_t>(major) << 16) | (static_cast<uint32_t>(minor) << 8) | patch;
+}
+
+/// @brief
+///   Get current linux kernel version. This is used to check if certain @c io_uring features are
+///   supported.
+/// @return
+///   An unsigned integer that represents current linux kernel version. This is created via function
+///   @c make_version.
+[[nodiscard]]
+static auto kernel_version() noexcept -> uint32_t {
+    int versions[3]{};
+
+    struct utsname name;
+    if (uname(&name) != 0)
+        return 0;
+
+    std::string_view s = name.release;
+    int *v             = versions;
+    for (char c : s) {
+        if (c >= '0' && c <= '9')
+            *v = *v * 10 + c - '0';
+        else if (c == '.')
+            ++v;
+        else
+            break;
+
+        if (v >= versions + std::size(versions))
+            break;
+    }
+
+    return make_version(static_cast<uint8_t>(versions[0]), static_cast<uint8_t>(versions[1]),
+                        static_cast<uint8_t>(versions[2]));
+}
+
+/// @brief
+///   Checks if current linux kernel version supports certain @c io_uring setup flags.
+/// @return
+///   @c io_uring flags that are supported by current linux kernel.
+[[nodiscard]]
+static auto io_uring_available_flags() noexcept -> uint32_t {
+    uint32_t flags   = 0;
+    const uint32_t v = kernel_version();
+
+    if (v >= make_version(5, 11, 0))
+        flags |= io_uring_setup_sqpoll;
+
+    if (v >= make_version(6, 0, 0))
+        flags |= io_uring_setup_single_issuer;
+
+    if (v >= make_version(6, 6, 0))
+        flags |= io_uring_setup_no_sqarray;
+
+    return flags;
+}
+
+/// @brief
+///   Checks if current linux kernel version supports certain @c io_uring features.
+/// @return
+///   @c io_uring features that are supported by current linux kernel.
+[[nodiscard]]
+static auto io_uring_available_features() noexcept -> uint32_t {
+    uint32_t features = io_uring_feature_none;
+    const uint32_t v  = kernel_version();
+
+    if (v >= make_version(5, 4, 0))
+        features |= io_uring_feature_single_mmap;
+
+    if (v >= make_version(5, 6, 0)) {
+        features |= io_uring_feature_fast_poll;
+        features |= io_uring_feature_rw_cur_pos;
+    }
+
+    if (v >= make_version(5, 11, 0))
+        features |= io_uring_feature_sqpoll_nonfixed;
+
+    if (v >= make_version(5, 19, 0))
+        features |= io_uring_feature_nodrop;
+
+    return features;
+}
+
+nyaio::io_context_worker::io_context_worker()
+    : m_should_stop(false), m_is_running(false),
+      m_ring(4096, io_uring_available_flags(), io_uring_available_features()), m_padding() {}
+
+nyaio::io_context_worker::~io_context_worker() {
+    assert(!m_is_running.load(std::memory_order_relaxed));
+}
+
+auto nyaio::io_context_worker::run() noexcept -> void {
+    if (m_is_running.exchange(true, std::memory_order_relaxed)) [[unlikely]]
+        return;
+
+    m_should_stop.store(false, std::memory_order_relaxed);
+    while (!m_should_stop.load(std::memory_order_relaxed)) [[likely]] {
+        m_ring.submit();
+        io_uring_cqe *cqe = m_ring.wait_cqe();
+
+        do {
+            // This is a wake-up event. Ignore it.
+            if (cqe->user_data == 0) [[unlikely]] {
+                m_ring.consume_cqes(1);
+                cqe = m_ring.poll_cqe();
+                continue;
+            }
+
+            auto *p = reinterpret_cast<promise_base *>(static_cast<uintptr_t>(cqe->user_data));
+
+            p->set_io_uring_flags(cqe->flags);
+            p->set_io_uring_result(cqe->res);
+
+            // It is safe to mark current cqe as consumed.
+            m_ring.consume_cqes(1);
+
+            if (p->is_cancelled()) [[unlikely]] {
+                p->release();
+            } else {
+                auto &stack_bottom = p->stack_bottom_promise();
+                p->coroutine().resume();
+                if (stack_bottom.coroutine().done())
+                    stack_bottom.release();
+            }
+
+            cqe = m_ring.poll_cqe();
+        } while (cqe != nullptr);
+    }
+
+    // Marks that this worker is not running.
+    m_is_running.store(false, std::memory_order_relaxed);
+}
+
+auto nyaio::io_context_worker::stop() noexcept -> void {
+    if (!m_is_running.load(std::memory_order_relaxed)) [[unlikely]]
+        return;
+
+    m_should_stop.store(true, std::memory_order_relaxed);
+
+    // Wake-up this worker.
+    io_uring_sqe *sqe = m_ring.poll_sqe();
+    while (sqe == nullptr) [[unlikely]] {
+        m_ring.submit();
+        sqe = m_ring.poll_sqe();
+    }
+
+    sqe->opcode    = IORING_OP_NOP;
+    sqe->fd        = -1;
+    sqe->user_data = 0;
+
+    m_ring.submit();
+}
+
+nyaio::io_context::io_context() : m_size(), m_workers(), m_threads(), m_next() {
+    m_size = std::thread::hardware_concurrency();
+
+    // SQPOLL will create an extra kernel thread for each worker.
+    if (io_uring_available_flags() & io_uring_setup_sqpoll)
+        m_size /= 2;
+
+    if (m_size == 0)
+        m_size = 1;
+
+    m_workers = std::make_unique<io_context_worker[]>(m_size);
+    m_threads = std::make_unique<std::jthread[]>(m_size);
+}
+
+nyaio::io_context::io_context(size_t count) : m_size(), m_workers(), m_threads(), m_next() {
+    if (count == 0) {
+        m_size = std::thread::hardware_concurrency();
+
+        // SQPOLL will create an extra kernel thread for each worker.
+        if (io_uring_available_flags() & io_uring_setup_sqpoll)
+            m_size /= 2;
+
+        if (m_size == 0)
+            m_size = 1;
+    } else {
+        m_size = count;
+    }
+
+    m_workers = std::make_unique<io_context_worker[]>(m_size);
+    m_threads = std::make_unique<std::jthread[]>(m_size);
+}
+
+nyaio::io_context::~io_context() {
+    stop();
+}
+
+auto nyaio::io_context::start() noexcept -> void {
+    for (size_t i = 0; i < m_size; ++i)
+        m_threads[i] = std::jthread(&io_context_worker::run, &m_workers[i]);
+}
+
+auto nyaio::io_context::run() noexcept -> void {
+    for (size_t i = 0; i < m_size; ++i)
+        m_threads[i] = std::jthread(&io_context_worker::run, &m_workers[i]);
+    for (size_t i = 0; i < m_size; ++i)
+        m_threads[i].join();
+}
+
+auto nyaio::io_context::stop() noexcept -> void {
+    for (size_t i = 0; i < m_size; ++i)
+        m_workers[i].stop();
 }

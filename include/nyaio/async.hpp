@@ -3,7 +3,9 @@
 #include <atomic>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <optional>
+#include <thread>
 
 #include <linux/io_uring.h>
 
@@ -248,8 +250,8 @@ public:
         ///   coroutine is the coroutine stack bottom.
         template <class Promise>
             requires(std::is_base_of_v<promise_base, Promise>)
-        static auto await_suspend(std::coroutine_handle<Promise> coro) noexcept
-            -> std::coroutine_handle<> {
+        static auto
+        await_suspend(std::coroutine_handle<Promise> coro) noexcept -> std::coroutine_handle<> {
             auto &p = static_cast<promise_base &>(coro.promise());
             if (p.m_caller == nullptr)
                 return std::noop_coroutine();
@@ -964,6 +966,211 @@ public:
 
 private:
     T *m_value;
+};
+
+} // namespace nyaio
+
+namespace nyaio {
+
+/// @class io_context_worker
+/// @brief
+///   Worker for handling IO events.
+class io_context_worker {
+public:
+    /// @brief
+    ///   Create a new worker and initialize @c io_uring.
+    /// @throws std::system_error
+    ///   Thrown if failed to initialize @c io_uring.
+    NYAIO_API io_context_worker();
+
+    /// @brief
+    ///   @c io_context_worker is not copyable.
+    io_context_worker(const io_context_worker &other) = delete;
+
+    /// @brief
+    ///   @c io_context_worker is not movable.
+    io_context_worker(io_context_worker &&other) = delete;
+
+    /// @brief
+    ///   Destroy the @c io_uring. Worker must be manually stopped before destroying.
+    NYAIO_API ~io_context_worker();
+
+    /// @brief
+    ///   @c io_context_worker is not copyable.
+    auto operator=(const io_context_worker &other) = delete;
+
+    /// @brief
+    ///   @c io_context_worker is not movable.
+    auto operator=(io_context_worker &&other) = delete;
+
+    /// @brief
+    ///   Start this worker and handle IO requests. This method will block this thread. This method
+    ///   should not be called in multiple threads at the same time.
+    NYAIO_API auto run() noexcept -> void;
+
+    /// @brief
+    ///   Send a stop request to this worker. This method does not block current thread.
+    NYAIO_API auto stop() noexcept -> void;
+
+    /// @brief
+    ///   Checks if this worker is running.
+    /// @retval true
+    ///   This worker is running.
+    /// @retval false
+    ///   This worker is not running.
+    [[nodiscard]]
+    auto is_running() const noexcept -> bool {
+        return m_is_running.load(std::memory_order_relaxed);
+    }
+
+    /// @brief
+    ///   For internal usage. Get poller for this worker.
+    /// @return
+    ///   Reference to the @c io_uring.
+    [[nodiscard]]
+    auto poller() const noexcept -> detail::io_uring & {
+        return m_ring;
+    }
+
+    /// @brief
+    ///   Schedule a new task in this worker.
+    /// @tparam T
+    ///   Return type of the task to be scheduled.
+    /// @param t
+    ///   The task to be scheduled. This worker will take the ownership of the scheduled task @p t.
+    template <class T>
+    auto schedule(task<T> t) noexcept -> void {
+        auto c  = t.detach();
+        auto &p = static_cast<detail::promise_base &>(c.promise());
+        p.set_worker(this);
+
+        io_uring_sqe *sqe = m_ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            m_ring.submit();
+            sqe = m_ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_NOP;
+        sqe->fd        = -1;
+        sqe->user_data = reinterpret_cast<uint64_t>(&p);
+
+        m_ring.flush_sq();
+    }
+
+private:
+    std::atomic_bool m_should_stop;
+    std::atomic_bool m_is_running;
+    mutable detail::io_uring m_ring;
+
+    // Pad worker to be aligned up with cache line.
+    [[maybe_unused]] char m_padding[256 - sizeof(void *) - sizeof(m_ring)];
+};
+
+/// @class io_context
+/// @brief
+///   Context for asynchronous IO operations. A static thread pool is used.
+class io_context {
+public:
+    /// @brief
+    ///   Create a new IO context and initialize workers. Number of workers will be automatically
+    ///   set due to number of CPU virtual cores.
+    /// @throws std::system_error
+    ///   Thrown if failed to initialize @c io_uring for workers.
+    NYAIO_API io_context();
+
+    /// @brief
+    ///   Create a new IO context and initialize workers.
+    /// @param count
+    ///   Expected number of workers to be created. Pass 0 to detect number of workers
+    ///   automatically.
+    /// @throws std::system_error
+    ///   Thrown if failed to initialize @c io_uring for workers.
+    NYAIO_API explicit io_context(size_t count);
+
+    /// @brief
+    ///   @c io_context is not copyable.
+    io_context(const io_context &other) = delete;
+
+    /// @brief
+    ///   @c io_context is not movable.
+    io_context(io_context &&other) = delete;
+
+    /// @brief
+    ///   Stop all workers and destroy this context.
+    /// @warning
+    ///   There may be memory leaks if there are pending I/O tasks scheduled in asynchronize I/O
+    ///   multiplexer when stopping. This is due to internal implementation of the worker class.
+    ///   This may be fixed in the future.
+    NYAIO_API ~io_context();
+
+    /// @brief
+    ///   @c io_context is not copyable.
+    auto operator=(const io_context &other) = delete;
+
+    /// @brief
+    ///   @c io_context is not movable.
+    auto operator=(io_context &&other) = delete;
+
+    /// @brief
+    ///   Start all worker threads. This method returns immediately once workers are started.
+    NYAIO_API auto start() noexcept -> void;
+
+    /// @brief
+    ///   Start all worker threads. This method blocks current thread until all worker threads are
+    ///   completed.
+    NYAIO_API auto run() noexcept -> void;
+
+    /// @brief
+    ///   Stop all workers. This method will send a stop request and return immediately. Workers may
+    ///   not be stopped immediately.
+    NYAIO_API auto stop() noexcept -> void;
+
+    /// @brief
+    ///   Get number of workers in this context.
+    /// @return
+    ///   Number of workers in this context.
+    [[nodiscard]]
+    auto size() const noexcept -> size_t {
+        return m_size;
+    }
+
+    /// @brief
+    ///   Schedule a new task in this context. Round-Robin is used here to choose which worker to be
+    ///   used.
+    /// @tparam T
+    ///   Return type of the task to be executed.
+    /// @param t
+    ///   The task to be scheduled.
+    template <class T>
+    auto schedule(task<T> t) const noexcept -> void {
+        auto next = m_next.fetch_add(1, std::memory_order_relaxed) % m_size;
+        m_workers[next].schedule<T>(std::move(t));
+    }
+
+    /// @brief
+    ///   Dispatch tasks to all workers.
+    /// @tparam Func
+    ///   Type of the dispatcher function. The function should return a task.
+    /// @tparam Args
+    ///   Types of arguments to be passed to the dispatcher function.
+    /// @param func
+    ///   The dispatcher function to generate tasks. This may be called multiple times.
+    /// @param args
+    ///   Arguments to be passed to the dispatcher function. Please notice that the dispatcher
+    ///   function may be called multiple times. So be very careful to pass rvalue-reference
+    ///   arguments.
+    template <class Func, class... Args>
+        requires(std::is_invocable_v<Func, Args && ...>)
+    auto dispatch(Func &&func, Args &&...args) const -> void {
+        for (size_t i = 0; i < m_size; ++i)
+            m_workers[i].schedule(func(std::forward<Args>(args)...));
+    }
+
+private:
+    size_t m_size;
+    std::unique_ptr<io_context_worker[]> m_workers;
+    std::unique_ptr<std::jthread[]> m_threads;
+    mutable std::atomic_size_t m_next;
 };
 
 } // namespace nyaio
