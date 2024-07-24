@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <csignal>
+#include <limits>
 #include <system_error>
 
 #include <sys/mman.h>
@@ -373,8 +374,8 @@ static auto io_uring_available_features() noexcept -> uint32_t {
 }
 
 nyaio::io_context_worker::io_context_worker()
-    : m_should_stop(false), m_is_running(false),
-      m_ring(4096, io_uring_available_flags(), io_uring_available_features()), m_padding() {}
+    : m_is_running(false), m_ring(4096, io_uring_available_flags(), io_uring_available_features()),
+      m_padding() {}
 
 nyaio::io_context_worker::~io_context_worker() {
     assert(!m_is_running.load(std::memory_order_relaxed));
@@ -384,8 +385,8 @@ auto nyaio::io_context_worker::run() noexcept -> void {
     if (m_is_running.exchange(true, std::memory_order_relaxed)) [[unlikely]]
         return;
 
-    m_should_stop.store(false, std::memory_order_relaxed);
-    while (!m_should_stop.load(std::memory_order_relaxed)) [[likely]] {
+    bool should_stop = false;
+    while (!should_stop) [[likely]] {
         m_ring.submit();
         io_uring_cqe *cqe = m_ring.wait_cqe();
 
@@ -395,6 +396,15 @@ auto nyaio::io_context_worker::run() noexcept -> void {
                 m_ring.consume_cqes(1);
                 cqe = m_ring.poll_cqe();
                 continue;
+            }
+
+            // This is a stop event.
+            if (cqe->user_data == std::numeric_limits<uint64_t>::max()) [[unlikely]] {
+                should_stop = true;
+
+                m_ring.consume_cqes(1);
+                cqe = m_ring.poll_cqe();
+                continue; // Handle all completed events before exiting.
             }
 
             auto *p = reinterpret_cast<promise_base *>(static_cast<uintptr_t>(cqe->user_data));
@@ -426,9 +436,6 @@ auto nyaio::io_context_worker::stop() noexcept -> void {
     if (!m_is_running.load(std::memory_order_relaxed)) [[unlikely]]
         return;
 
-    m_should_stop.store(true, std::memory_order_relaxed);
-
-    // Wake-up this worker.
     io_uring_sqe *sqe = m_ring.poll_sqe();
     while (sqe == nullptr) [[unlikely]] {
         m_ring.submit();
@@ -437,7 +444,7 @@ auto nyaio::io_context_worker::stop() noexcept -> void {
 
     sqe->opcode    = IORING_OP_NOP;
     sqe->fd        = -1;
-    sqe->user_data = 0;
+    sqe->user_data = std::numeric_limits<uint64_t>::max();
 
     m_ring.submit();
 }

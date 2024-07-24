@@ -887,7 +887,7 @@ public:
     }
 
     /// @brief
-    ///   Get result ofthis coroutine. Exceptions may be thrown if the coroutine is not completed.
+    ///   Get result of this coroutine. Exceptions may be thrown if the coroutine is not completed.
     auto result() const -> void {
         if (m_exception != nullptr) [[unlikely]]
             std::rethrow_exception(m_exception);
@@ -1058,7 +1058,6 @@ public:
     }
 
 private:
-    std::atomic_bool m_should_stop;
     std::atomic_bool m_is_running;
     mutable detail::io_uring m_ring;
 
