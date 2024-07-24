@@ -3,6 +3,7 @@
 #include <atomic>
 #include <coroutine>
 #include <exception>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -1052,7 +1053,7 @@ public:
 
         sqe->opcode    = IORING_OP_NOP;
         sqe->fd        = -1;
-        sqe->user_data = reinterpret_cast<uint64_t>(&p);
+        sqe->user_data = reinterpret_cast<uintptr_t>(&p);
 
         m_ring.flush_sq();
     }
@@ -1338,6 +1339,84 @@ public:
 
 private:
     __kernel_timespec m_time;
+};
+
+/// @class read_awaitable
+/// @brief
+///   Awaitable object for async read operation.
+class [[nodiscard]] read_awaitable {
+public:
+    /// @brief
+    ///   Create a new @c read_awaitable for async read operation.
+    /// @param file
+    ///   File descriptor to be read from.
+    /// @param[out] buffer
+    ///   Pointer to start of the buffer to store the read data.
+    /// @param size
+    ///   Expected size in byte of data to be read.
+    /// @param offset
+    ///   Offset in byte of the file to start reading. Pass -1 to read from current file pointer.
+    ///   For file descriptors that do not support random access, this value should be 0.
+    read_awaitable(int file, void *buffer, uint32_t size, uint64_t offset) noexcept
+        : m_promise(), m_file(file), m_size(size), m_buffer(buffer), m_offset(offset) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async read operation and suspend the coroutine.
+    /// @tparam Promise
+    ///   Promise type of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be suspended.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        m_promise    = std::addressof(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(m_promise->worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_READ;
+        sqe->fd        = m_file;
+        sqe->off       = m_offset;
+        sqe->addr      = reinterpret_cast<uintptr_t>(m_buffer);
+        sqe->len       = m_size;
+        sqe->user_data = reinterpret_cast<uintptr_t>(m_promise);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume the coroutine and get result of the async read operation.
+    /// @return
+    ///   An @c std::expected object that contains actual bytes read from the file. @c std::errc is
+    ///   returned as error code if the read operation failed.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
+        int ret = m_promise->io_uring_result();
+        if (ret < 0) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(-ret));
+        return static_cast<uint32_t>(ret);
+    }
+
+private:
+    detail::promise_base *m_promise;
+    int m_file;
+    uint32_t m_size;
+    void *m_buffer;
+    uint64_t m_offset;
 };
 
 } // namespace nyaio
