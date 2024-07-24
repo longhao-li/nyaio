@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cassert>
 #include <csignal>
-#include <limits>
 #include <system_error>
 
 #include <sys/mman.h>
@@ -385,26 +384,16 @@ auto nyaio::io_context_worker::run() noexcept -> void {
     if (m_is_running.exchange(true, std::memory_order_relaxed)) [[unlikely]]
         return;
 
-    bool should_stop = false;
-    while (!should_stop) [[likely]] {
+    while (true) {
         m_ring.submit();
         io_uring_cqe *cqe = m_ring.wait_cqe();
 
         do {
-            // This is a wake-up event. Ignore it.
+            // This is a stop event.
             if (cqe->user_data == 0) [[unlikely]] {
                 m_ring.consume_cqes(1);
-                cqe = m_ring.poll_cqe();
-                continue;
-            }
-
-            // This is a stop event.
-            if (cqe->user_data == std::numeric_limits<uint64_t>::max()) [[unlikely]] {
-                should_stop = true;
-
-                m_ring.consume_cqes(1);
-                cqe = m_ring.poll_cqe();
-                continue; // Handle all completed events before exiting.
+                m_is_running.store(false, std::memory_order_relaxed);
+                return;
             }
 
             auto *p = reinterpret_cast<promise_base *>(static_cast<uintptr_t>(cqe->user_data));
@@ -427,9 +416,6 @@ auto nyaio::io_context_worker::run() noexcept -> void {
             cqe = m_ring.poll_cqe();
         } while (cqe != nullptr);
     }
-
-    // Marks that this worker is not running.
-    m_is_running.store(false, std::memory_order_relaxed);
 }
 
 auto nyaio::io_context_worker::stop() noexcept -> void {
@@ -447,7 +433,7 @@ auto nyaio::io_context_worker::stop() noexcept -> void {
 
     sqe->opcode    = IORING_OP_NOP;
     sqe->fd        = -1;
-    sqe->user_data = std::numeric_limits<uint64_t>::max();
+    sqe->user_data = 0;
 
     m_ring.submit();
 }

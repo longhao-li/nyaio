@@ -1173,3 +1173,56 @@ private:
 };
 
 } // namespace nyaio
+
+namespace nyaio {
+
+/// @class yield_awaitable
+/// @brief
+///   Awaitable object for yielding current coroutine.
+class [[nodiscard]] yield_awaitable {
+public:
+    /// @brief
+    ///   Create a new awaitable object for yielding current coroutine.
+    constexpr yield_awaitable() noexcept = default;
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for yielding and suspend this coroutine.
+    /// @tparam Promise
+    ///   Type of promise of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be yielded.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        auto &p      = static_cast<detail::promise_base &>(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(p.worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_NOP;
+        sqe->fd        = -1;
+        sqe->user_data = reinterpret_cast<uintptr_t>(&p);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume this coroutine from yielding. Do nothing.
+    static constexpr auto await_resume() noexcept -> void {}
+};
+
+} // namespace nyaio
