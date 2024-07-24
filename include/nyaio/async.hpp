@@ -1419,4 +1419,83 @@ private:
     uint64_t m_offset;
 };
 
+/// @class write_awaitable
+/// @brief
+///   Awaitable object for async write operation.
+class [[nodiscard]] write_awaitable {
+public:
+    /// @brief
+    ///   Create a new @c write_awaitable for async write operation.
+    /// @param file
+    ///   File descriptor to write to.
+    /// @param data
+    ///   Pointer to start of the data to be written.
+    /// @param size
+    ///   Expected size in byte of data to be written.
+    /// @param offset
+    ///   Offset in byte of the file to start writing. Pass @c std::numeric_limit<uint64_t>::max()
+    ///   to write to current file pointer. For files does not support random access, this value
+    ///   should be 0.
+    write_awaitable(int file, const void *data, uint32_t size, uint64_t offset) noexcept
+        : m_promise(), m_file(file), m_size(size), m_data(data), m_offset(offset) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async write operation and suspend the coroutine.
+    /// @tparam Promise
+    ///   Promise type of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be suspended.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        m_promise    = std::addressof(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(m_promise->worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_WRITE;
+        sqe->fd        = m_file;
+        sqe->off       = m_offset;
+        sqe->addr      = reinterpret_cast<uintptr_t>(m_data);
+        sqe->len       = m_size;
+        sqe->user_data = reinterpret_cast<uintptr_t>(m_promise);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume the coroutine and get result of the async write operation.
+    /// @return
+    ///   An @c std::expected object that contains actual bytes written to the file. @c std::errc is
+    ///   returned as error code if the write operation failed.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
+        int ret = m_promise->io_uring_result();
+        if (ret < 0) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(-ret));
+        return static_cast<uint32_t>(ret);
+    }
+
+private:
+    detail::promise_base *m_promise;
+    int m_file;
+    uint32_t m_size;
+    const void *m_data;
+    uint64_t m_offset;
+};
+
 } // namespace nyaio
