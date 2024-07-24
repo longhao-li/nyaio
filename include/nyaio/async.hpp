@@ -1575,4 +1575,81 @@ private:
     int m_flags;
 };
 
+/// @class send_awaitable
+/// @brief
+///   Awaitable object for async send operation.
+class [[nodiscard]] send_awaitable {
+public:
+    /// @brief
+    ///   Create a new @c send_awaitable for async send operation.
+    /// @param socket
+    ///   The socket to send data to.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent.
+    /// @param flags
+    ///   Flags for this async send operation. See linux manual for @c send for details.
+    send_awaitable(int socket, const void *data, uint32_t size, int flags) noexcept
+        : m_promise(), m_socket(socket), m_size(size), m_data(data), m_flags(flags) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async send operation and suspend the coroutine.
+    /// @tparam Promise
+    ///   Promise type of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be suspended.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        m_promise    = std::addressof(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(m_promise->worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_SEND;
+        sqe->fd        = m_socket;
+        sqe->addr      = reinterpret_cast<uintptr_t>(m_data);
+        sqe->len       = m_size;
+        sqe->msg_flags = static_cast<uint32_t>(m_flags);
+        sqe->user_data = reinterpret_cast<uintptr_t>(m_promise);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume the coroutine and get result of the async send operation.
+    /// @return
+    ///   An @c std::expected object that contains actual bytes sent to the socket. @c std::errc is
+    ///   returned as error code if the send operation failed.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
+        int ret = m_promise->io_uring_result();
+        if (ret < 0) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(-ret));
+        return static_cast<uint32_t>(ret);
+    }
+
+private:
+    detail::promise_base *m_promise;
+    int m_socket;
+    uint32_t m_size;
+    const void *m_data;
+    int m_flags;
+};
+
 } // namespace nyaio
