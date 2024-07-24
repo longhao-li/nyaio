@@ -1,7 +1,9 @@
 #pragma once
 
 #include <atomic>
-#include <cstring>
+#include <coroutine>
+#include <exception>
+#include <optional>
 
 #include <linux/io_uring.h>
 
@@ -109,7 +111,7 @@ public:
             m_sq.sqe_tail      = next;
 
             // Initialize the new sqe.
-            memset(sqe, 0, sizeof(io_uring_sqe));
+            __builtin_memset(sqe, 0, sizeof(io_uring_sqe));
             return sqe;
         }
 
@@ -211,3 +213,757 @@ private:
 };
 
 } // namespace nyaio::detail
+
+namespace nyaio {
+namespace detail {
+
+/// @class promise_base
+/// @brief
+///   Base class of coroutine promises.
+class promise_base {
+public:
+    /// @struct final_awaitable
+    /// @brief
+    ///   For internal usage. Final awaitable object for tasks. See C++20 coroutine documents for
+    ///   details.
+    struct final_awaitable {
+        /// @brief
+        ///   For internal usage. C++20 coroutine API. Coroutines should always maintain coroutine
+        ///   stack before finalizing.
+        /// @return
+        ///   This method always returns @c false.
+        static constexpr auto await_ready() noexcept -> bool {
+            return false;
+        }
+
+        /// @brief
+        ///   For internal usage. C++20 coroutine API. Maintain the coroutine promise status and do
+        ///   coroutine context switch.
+        /// @tparam Promise
+        ///   Promise type of the coroutine to be finalized.
+        /// @param coro
+        ///   The coroutine to be finalized.
+        /// @return
+        ///   The caller coroutine to be resumed. A noop coroutine is returned if the finalized
+        ///   coroutine is the coroutine stack bottom.
+        template <class Promise>
+            requires(std::is_base_of_v<promise_base, Promise>)
+        static auto await_suspend(std::coroutine_handle<Promise> coro) noexcept
+            -> std::coroutine_handle<> {
+            auto &p = static_cast<promise_base &>(coro.promise());
+            if (p.m_caller == nullptr)
+                return std::noop_coroutine();
+
+            // The caller coroutine should be resumed.
+            if (p.notify() == 1)
+                return p.m_caller;
+
+            return std::noop_coroutine();
+        }
+
+        /// @brief
+        ///   For internal usage. C++20 coroutine API. Do nothing.
+        static constexpr auto await_resume() noexcept -> void {}
+    };
+
+public:
+    /// @brief
+    ///   Initialize this promise object.
+    promise_base() noexcept
+        : m_is_cancelled(false), m_reference_count(1), m_waiting_tasks(0), m_coroutine(),
+          m_caller(), m_caller_promise(), m_stack_bottom_promise(), m_io_uring_flags(),
+          m_io_uring_result(), m_worker(), m_exception() {}
+
+    /// @brief
+    ///   Promise is not copyable.
+    promise_base(const promise_base &other) = delete;
+
+    /// @brief
+    ///   Promise is not movable.
+    promise_base(promise_base &&other) = delete;
+
+    /// @brief
+    ///   Destroy this promise and release resources.
+    ~promise_base() = default;
+
+    /// @brief
+    ///   Promise is not copyable.
+    auto operator=(const promise_base &other) = delete;
+
+    /// @brief
+    ///   Promise is not movable.
+    auto operator=(promise_base &&other) = delete;
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Tasks should not execute immediately on created.
+    /// @return
+    ///   Returns a @c std::suspend_always object.
+    [[nodiscard]]
+    static constexpr auto initial_suspend() noexcept -> std::suspend_always {
+        return {};
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Return @c final_awaitable to maintain the
+    ///   coroutine stack and context. See @c final_awaitable for more details.
+    /// @return
+    ///   Returns a @c final_awaitable object.
+    [[nodiscard]]
+    static constexpr auto final_suspend() noexcept -> final_awaitable {
+        return {};
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Catch and save unhandled exception for this
+    ///   coroutine.
+    auto unhandled_exception() noexcept -> void {
+        m_exception = std::current_exception();
+    }
+
+    /// @brief
+    ///   Get coroutine handle for this promise.
+    /// @return
+    ///   Coroutine handle for this promise.
+    [[nodiscard]]
+    auto coroutine() const noexcept -> std::coroutine_handle<> {
+        return m_coroutine;
+    }
+
+    /// @brief
+    ///   Increase reference count for this coroutine.
+    auto acquire() noexcept -> void {
+        m_reference_count.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /// @brief
+    ///   Decrease reference count for this coroutine and destroy it if necessary.
+    auto release() noexcept -> void {
+        int count = m_reference_count.fetch_sub(1, std::memory_order_relaxed);
+        if (count == 1)
+            m_coroutine.destroy();
+    }
+
+    /// @brief
+    ///   Get current reference counting for this coroutine.
+    /// @return
+    ///   Current reference counting for this coroutine.
+    [[nodiscard]]
+    auto reference_count() const noexcept -> size_t {
+        return static_cast<size_t>(m_reference_count.load(std::memory_order_relaxed));
+    }
+
+    /// @brief
+    ///   Marks that this coroutine should wait for a new task to be done.
+    /// @param count
+    ///   Number of tasks to be waited.
+    auto wait(size_t count = 1) noexcept -> void {
+        m_waiting_tasks.fetch_add(static_cast<int>(count), std::memory_order_relaxed);
+    }
+
+    /// @brief
+    ///   Marks that a task that this coroutine is waiting for has been completed.
+    /// @return
+    ///   Number of waiting tasks before notify. That is, the return value is 1 if this coroutine
+    ///   should be resumed.
+    auto notify() noexcept -> size_t {
+        return static_cast<size_t>(m_waiting_tasks.fetch_sub(1, std::memory_order_relaxed));
+    }
+
+    /// @brief
+    ///   Get number of tasks that this coroutine is waiting for.
+    /// @return
+    ///   Number of tasks that this coroutine is waiting for.
+    [[nodiscard]]
+    auto waiting_tasks() const noexcept -> size_t {
+        return static_cast<size_t>(m_waiting_tasks.load(std::memory_order_relaxed));
+    }
+
+    /// @brief
+    ///   Marks that this coroutine should be cancelled. Cancelled tasks will not be resumed by
+    ///   executors.
+    auto cancel() noexcept -> void {
+        m_is_cancelled.store(true, std::memory_order_relaxed);
+    }
+
+    /// @brief
+    ///   Checks if this coroutine should be cancelled.
+    /// @retval true
+    ///   This coroutine is marked as cancelled.
+    /// @retval false
+    ///   This coroutine is not marked as cancelled.
+    [[nodiscard]]
+    auto is_cancelled() const noexcept -> bool {
+        return m_is_cancelled.load(std::memory_order_relaxed);
+    }
+
+    /// @brief
+    ///   Get promise for the coroutine stack bottom coroutine.
+    /// @return
+    ///   Reference to the coroutine call stack bottom coroutine.
+    [[nodiscard]]
+    auto stack_bottom_promise() const noexcept -> promise_base & {
+        return *m_stack_bottom_promise;
+    }
+
+    /// @brief
+    ///   For internal usage. Set flags returned by @c io_uring_cqe.
+    /// @param flags
+    ///   Flags returned by @c io_uring_cqe.
+    auto set_io_uring_flags(uint32_t flags) noexcept -> void {
+        m_io_uring_flags = flags;
+    }
+
+    /// @brief
+    ///   Get flags returned by @c io_uring_cqe.
+    /// @return
+    ///   Flags returned by @c io_uring_cqe.
+    [[nodiscard]]
+    auto io_uring_flags() const noexcept -> uint32_t {
+        return m_io_uring_flags;
+    }
+
+    /// @brief
+    ///   Set result returned by @c io_uring_cqe.
+    /// @param result
+    ///   Result returned by @c io_uring_cqe.
+    auto set_io_uring_result(int result) noexcept -> void {
+        m_io_uring_result = result;
+    }
+
+    /// @brief
+    ///   Get result returned by @c io_uring_cqe.
+    /// @return
+    ///   Result returned by @c io_uring_cqe.
+    [[nodiscard]]
+    auto io_uring_result() const noexcept -> int {
+        return m_io_uring_result;
+    }
+
+    /// @brief
+    ///   Get worker of this coroutine. Worker will be automatically passed to subcoroutines.
+    ///   Generally, this could be any user-sepcified pointer.
+    /// @return
+    ///   Pointer to current worker.
+    [[nodiscard]]
+    auto worker() const noexcept -> void * {
+        return m_worker;
+    }
+
+    /// @brief
+    ///   Set worker for this coroutine.
+    /// @param[in] w
+    ///   The worker to be set. Worker will be automatically passed to subcoroutines. Generally,
+    ///   this could be any user-sepcified pointer.
+    auto set_worker(void *w) noexcept -> void {
+        m_worker = w;
+    }
+
+    template <class>
+    friend class task_awaitable;
+
+protected:
+    std::atomic_bool m_is_cancelled;
+    std::atomic_int m_reference_count;
+    std::atomic_int m_waiting_tasks;
+
+    std::coroutine_handle<> m_coroutine;
+    std::coroutine_handle<> m_caller;
+    promise_base *m_caller_promise;
+    promise_base *m_stack_bottom_promise;
+
+    uint32_t m_io_uring_flags;
+    int m_io_uring_result;
+
+    void *m_worker;
+    std::exception_ptr m_exception;
+};
+
+} // namespace detail
+
+/// @class promise
+/// @tparam T
+///   Type of return value of the owner task.
+/// @brief
+///   Promise type for corresponding task.
+template <class T>
+class promise;
+
+namespace detail {
+
+/// @class task_awaitable
+/// @tparam T
+///   Return type of the coroutine.
+/// @brief
+///   Awaitable class for @c task.
+template <class T>
+class task_awaitable {
+public:
+    using value_type       = T;
+    using promise_type     = promise<value_type>;
+    using coroutine_handle = std::coroutine_handle<promise_type>;
+
+    /// @brief
+    ///   For internal usage. Create a @c task_awaitable object for the specified @c task to be
+    ///   awaited.
+    explicit task_awaitable(coroutine_handle coro) noexcept : m_coroutine(coro) {}
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine standard API. Checks if this coroutine should be
+    ///   suspended. Empty coroutine and completed coroutine should not be suspended.
+    /// @retval true
+    ///   Current coroutine should be suspended.
+    /// @retval false
+    ///   Current coroutine should not be suspended.
+    [[nodiscard]]
+    auto await_ready() const noexcept -> bool {
+        return m_coroutine == nullptr || m_coroutine.done();
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Do some preparation before suspending the caller
+    ///   coroutine.
+    template <class Promise>
+        requires(std::is_base_of_v<promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> caller) noexcept -> std::coroutine_handle<> {
+        auto &p  = static_cast<promise_base &>(m_coroutine.promise());
+        auto &cp = static_cast<promise_base &>(caller.promise());
+
+        p.m_caller               = caller;
+        p.m_caller_promise       = &cp;
+        p.m_stack_bottom_promise = cp.m_stack_bottom_promise;
+        p.m_worker               = cp.m_worker;
+
+        // The caller should wait for this coroutine completes.
+        cp.wait();
+
+        return m_coroutine;
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Get result of the task.
+    /// @return
+    ///   Result of the task.
+    auto await_resume() const -> value_type {
+        return std::move(m_coroutine.promise()).result();
+    }
+
+private:
+    coroutine_handle m_coroutine;
+};
+
+} // namespace detail
+
+/// @class task
+/// @tparam T
+///   Return type of this coroutine.
+/// @brief
+///   @c Task is a wrapper of coroutine that can be awaited.
+template <class T>
+class task {
+public:
+    using value_type       = T;
+    using promise_type     = nyaio::promise<value_type>;
+    using coroutine_handle = std::coroutine_handle<promise_type>;
+    using awaitable_type   = detail::task_awaitable<value_type>;
+
+    /// @brief
+    ///   Create an empty task. Empty task cannot be executed.
+    task() noexcept : m_coroutine(), m_promise() {}
+
+    /// @brief
+    ///   Wrap the specified coroutine as a @c task object.
+    /// @param coro
+    ///   Coroutine handle of this task.
+    /// @param[in] p
+    ///   Promise of this task.
+    task(coroutine_handle coro, promise_type &p) noexcept : m_coroutine(coro), m_promise(&p) {}
+
+    /// @brief
+    ///   Copy constructor of @c task. Reference counting is used.
+    /// @param other
+    ///   The @c task to be copied.
+    task(const task &other) noexcept : m_coroutine(), m_promise(other.m_promise) {
+        // Add reference count.
+        if (m_coroutine != nullptr)
+            m_promise->acquire();
+    }
+
+    /// @brief
+    ///   Move constructor of @c task.
+    /// @param other
+    ///   The @c task to be moved. @p other will be empty after this movement.
+    task(task &&other) noexcept : m_coroutine(other.m_coroutine), m_promise(other.m_promise) {
+        other.m_coroutine = nullptr;
+        other.m_promise   = nullptr;
+    }
+
+    /// @brief
+    ///   Decrease the reference count and release resources.
+    ~task() {
+        if (m_coroutine != nullptr)
+            m_promise->release();
+    }
+
+    /// @brief
+    ///   Copy assignment of @c task. Reference counting is used.
+    /// @param other
+    ///   The @c task to be copied from.
+    /// @return
+    ///   Reference to this @c task object.
+    auto operator=(const task &other) noexcept -> task & {
+        if (this == &other) [[unlikely]]
+            return *this;
+
+        if (m_coroutine == other.m_coroutine)
+            return *this;
+
+        if (m_coroutine != nullptr)
+            m_promise->release();
+
+        m_coroutine = other.m_coroutine;
+        m_promise   = other.m_promise;
+
+        if (m_coroutine != nullptr)
+            m_promise->acquire();
+
+        return *this;
+    }
+
+    /// @brief
+    ///   Move assignment of @c task.
+    /// @param other
+    ///   The @c task to be moved. @p other will be empty after this movement.
+    /// @return
+    ///   Reference to this @c task object.
+    auto operator=(task &&other) noexcept -> task & {
+        if (this == &other) [[unlikely]]
+            return *this;
+
+        if (m_coroutine != nullptr)
+            m_promise->release();
+
+        m_coroutine = other.m_coroutine;
+        m_promise   = other.m_promise;
+
+        other.m_coroutine = nullptr;
+        other.m_promise   = nullptr;
+
+        return *this;
+    }
+
+    /// @brief
+    ///   Checks if this task is null.
+    /// @retval true
+    ///   This task is null.
+    /// @retval false
+    ///   This task is not null.
+    [[nodiscard]]
+    auto empty() const noexcept -> bool {
+        return m_coroutine == nullptr;
+    }
+
+    /// @brief
+    ///   Checks if this @c task is completed.
+    /// @retval true
+    ///   This task is completed.
+    /// @retval false
+    ///   This task is not completed.
+    [[nodiscard]]
+    auto done() const noexcept -> bool {
+        return m_coroutine.done();
+    }
+
+    /// @brief
+    ///   Resume this task.
+    auto resume() -> void {
+        m_coroutine.resume();
+    }
+
+    /// @brief
+    ///   Get promise of this task.
+    /// @return
+    ///   Reference to promise of this task.
+    [[nodiscard]]
+    auto promise() const noexcept -> promise_type & {
+        return *m_promise;
+    }
+
+    /// @brief
+    ///   Detach the coroutine from this task. This task will be empty once detached. Lifetime of
+    ///   the detached coroutine should be manually managed.
+    /// @return
+    ///   Detached coroutine handle of this task.
+    [[nodiscard]]
+    auto detach() noexcept -> coroutine_handle {
+        coroutine_handle result = m_coroutine;
+        m_coroutine             = nullptr;
+        m_promise               = nullptr;
+        return result;
+    }
+
+    /// @brief
+    ///   C++20 coroutine awaitable API. Suspend the caller coroutine and start this one.
+    auto operator co_await() const noexcept -> awaitable_type {
+        return awaitable_type(m_coroutine);
+    }
+
+private:
+    coroutine_handle m_coroutine;
+    promise_type *m_promise;
+};
+
+/// @class promise
+/// @tparam T
+///   Type of return value of the owner task.
+/// @brief
+///   Promise type for corresponding task.
+template <class T>
+class promise final : public detail::promise_base {
+public:
+    /// @brief
+    ///   Create an empty @c promise object.
+    promise() noexcept : detail::promise_base(), m_value() {}
+
+    /// @brief
+    ///   @c promise is not copyable.
+    promise(const promise &other) = delete;
+
+    /// @brief
+    ///   @c promise is not movable.
+    promise(promise &&other) = delete;
+
+    /// @brief
+    ///   Destroy this promise and release resources.
+    ~promise() = default;
+
+    /// @brief
+    ///   @c promise is not copyable.
+    auto operator=(const promise &other) = delete;
+
+    /// @brief
+    ///   @c promise is not movable.
+    auto operator=(promise &&other) = delete;
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Acquire a new @c task object for this promise.
+    [[nodiscard]]
+    auto get_return_object() noexcept -> task<T> {
+        auto coro              = std::coroutine_handle<promise>::from_promise(*this);
+        m_coroutine            = coro;
+        m_stack_bottom_promise = this;
+        return {coro, *this};
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Store the coroutine return value temporarily.
+    /// @tparam Arg
+    ///   Type of return value of the coroutine. The return type should be able to construct from
+    ///   this type.
+    /// @param arg
+    ///   Reference to the actual return value of the coroutine.
+    template <class Arg = T>
+        requires(std::is_constructible_v<T, Arg &&>)
+    auto return_value(Arg &&arg) noexcept(std::is_nothrow_constructible_v<T, Arg &&>) -> void {
+        m_value.emplace(std::forward<Arg>(arg));
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Store the coroutine yielded value temporarily.
+    /// @tparam Arg
+    ///   Type of the return value of the coroutine. The return type should be able to construct
+    ///   from this type.
+    /// @param arg
+    ///   Reference to the actual return value of the coroutine.
+    /// @return
+    ///   The coroutine should always be suspended after yielding.
+    template <class Arg = T>
+        requires(std::is_constructible_v<T, Arg &&>)
+    auto yield_value(Arg &&arg) noexcept(std::is_nothrow_constructible_v<T, Arg &&>)
+        -> detail::promise_base::final_awaitable {
+        m_value.emplace(std::forward<Arg>(arg));
+        return {};
+    }
+
+    /// @brief
+    ///   Get result of this coroutine. Exceptions may be thrown if the coroutine is not completed.
+    /// @return
+    ///   Reference to the return value of this coroutine.
+    [[nodiscard]]
+    auto result() & -> T & {
+        if (m_exception != nullptr) [[unlikely]]
+            std::rethrow_exception(m_exception);
+        return m_value.value();
+    }
+
+    /// @brief
+    ///   Get result of this coroutine. Exceptions may be thrown if the coroutine is not completed.
+    /// @return
+    ///   Reference to the return value of this coroutine.
+    [[nodiscard]]
+    auto result() const & -> const T & {
+        if (m_exception != nullptr) [[unlikely]]
+            std::rethrow_exception(m_exception);
+        return m_value.value();
+    }
+
+    /// @brief
+    ///   Get result of this coroutine. Exceptions may be thrown if the coroutine is not completed.
+    /// @return
+    ///   Rvalue reference to the return value of this coroutine.
+    [[nodiscard]]
+    auto result() && -> T && {
+        if (m_exception != nullptr) [[unlikely]]
+            std::rethrow_exception(m_exception);
+        return std::move(m_value).value();
+    }
+
+    /// @brief
+    ///   Get result of this coroutine. Exceptions may be thrown if the coroutine is not completed.
+    /// @return
+    ///   Rvalue reference to the return value of this coroutine.
+    [[nodiscard]]
+    auto result() const && -> const T && {
+        if (m_exception != nullptr) [[unlikely]]
+            std::rethrow_exception(m_exception);
+        return std::move(m_value).value();
+    }
+
+private:
+    std::optional<T> m_value;
+};
+
+/// @class promise
+/// @brief
+///   Promise type for corresponding task.
+template <>
+class promise<void> final : public detail::promise_base {
+public:
+    /// @brief
+    ///   Create an empty @c promise object.
+    promise() noexcept : detail::promise_base() {}
+
+    /// @brief
+    ///   @c promise is not copyable.
+    promise(const promise &other) = delete;
+
+    /// @brief
+    ///   @c promise is not movable.
+    promise(promise &&other) = delete;
+
+    /// @brief
+    ///   Destroy this promise and release resources.
+    ~promise() = default;
+
+    /// @brief
+    ///   @c promise is not copyable.
+    auto operator=(const promise &other) = delete;
+
+    /// @brief
+    ///   @c promise is not movable.
+    auto operator=(promise &&other) = delete;
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Acquire a new @c task object for this promise.
+    [[nodiscard]]
+    auto get_return_object() noexcept -> task<void> {
+        auto coro              = std::coroutine_handle<promise>::from_promise(*this);
+        m_coroutine            = coro;
+        m_stack_bottom_promise = this;
+        return {coro, *this};
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Marks that this coroutine has no return value.
+    static constexpr auto return_void() noexcept -> void {}
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Allows void tasks to be yielded.
+    /// @return
+    ///   Yielded coroutines should always be suspended.
+    static constexpr auto yield_value() noexcept -> detail::promise_base::final_awaitable {
+        return {};
+    }
+
+    /// @brief
+    ///   Get result ofthis coroutine. Exceptions may be thrown if the coroutine is not completed.
+    auto result() const -> void {
+        if (m_exception != nullptr) [[unlikely]]
+            std::rethrow_exception(m_exception);
+    }
+};
+
+/// @class promise
+/// @brief
+///   Promise type for corresponding task.
+template <class T>
+class promise<T &> final : public detail::promise_base {
+public:
+    /// @brief
+    ///   Create an empty @c promise object.
+    promise() noexcept : detail::promise_base(), m_value() {}
+
+    /// @brief
+    ///   @c promise is not copyable.
+    promise(const promise &other) = delete;
+
+    /// @brief
+    ///   @c promise is not movable.
+    promise(promise &&other) = delete;
+
+    /// @brief
+    ///   Destroy this promise and release resources.
+    ~promise() = default;
+
+    /// @brief
+    ///   @c promise is not copyable.
+    auto operator=(const promise &other) = delete;
+
+    /// @brief
+    ///   @c promise is not movable.
+    auto operator=(promise &&other) = delete;
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine API. Acquire a new @c task object for this promise.
+    [[nodiscard]]
+    auto get_return_object() noexcept -> task<T &> {
+        auto coro              = std::coroutine_handle<promise>::from_promise(*this);
+        m_coroutine            = coro;
+        m_stack_bottom_promise = this;
+        return {coro, *this};
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine standard API. Cache return value of this coroutine.
+    /// @param[in] value
+    ///   The value returned by coroutine.
+    auto return_value(T &value) noexcept -> void {
+        m_value = std::addressof(value);
+    }
+
+    /// @brief
+    ///   For internal usage. C++20 coroutine standard API. Cache yield value of this coroutine.
+    /// @param[in] value
+    ///   The return yielded by coroutine.
+    /// @return
+    ///   Yielded coroutines should always be suspended.
+    auto yield_value(T &value) noexcept -> detail::promise_base::final_awaitable {
+        m_value = std::addressof(value);
+        return {};
+    }
+
+    /// @brief
+    ///   Get result ofthis coroutine. Exceptions may be thrown if the coroutine is not completed.
+    /// @return
+    ///   The reference returned by coroutine.
+    [[nodiscard]]
+    auto result() const -> T & {
+        if (m_exception != nullptr) [[unlikely]]
+            std::rethrow_exception(m_exception);
+        return *m_value;
+    }
+
+private:
+    T *m_value;
+};
+
+} // namespace nyaio
