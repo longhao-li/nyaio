@@ -438,6 +438,9 @@ auto nyaio::io_context_worker::stop() noexcept -> void {
 
     io_uring_sqe *sqe = m_ring.poll_sqe();
     while (sqe == nullptr) [[unlikely]] {
+        if (!m_is_running.load(std::memory_order_relaxed)) [[unlikely]]
+            return;
+
         m_ring.submit();
         sqe = m_ring.poll_sqe();
     }
