@@ -1225,4 +1225,72 @@ public:
     static constexpr auto await_resume() noexcept -> void {}
 };
 
+/// @class timeout_awaitable
+/// @brief
+///   Awaitable object for timeout event. This awaitable suspends current coroutine for the
+///   specified time.
+class [[nodiscard]] timeout_awaitable {
+public:
+    /// @brief
+    ///   Create a new awaitable object for timeout event.
+    /// @tparam Rep
+    ///   Type representation of duration type. See @c std::chrono::duration for details.
+    /// @tparam Period
+    ///   Ratio type that is used to measure how to do conversion between different duration types.
+    ///   See @c std::chrono::duration for details.
+    /// @param duration
+    ///   Timeout duration. Ratios less than nanoseconds are not allowed.
+    template <class Rep, class Period>
+        requires(std::ratio_greater_equal_v<std::nano, Period>)
+    explicit timeout_awaitable(std::chrono::duration<Rep, Period> duration) noexcept : m_time() {
+        auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
+        m_time.tv_sec    = nanoseconds / 1000000000ULL;
+        m_time.tv_nsec   = nanoseconds % 1000000000ULL;
+    }
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for timeout and suspend this coroutine.
+    /// @tparam Promise
+    ///   Type of promise of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be suspended.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        auto &p      = static_cast<detail::promise_base &>(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(p.worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_TIMEOUT;
+        sqe->fd        = -1;
+        sqe->addr      = reinterpret_cast<uintptr_t>(&m_time);
+        sqe->len       = sizeof(m_time);
+        sqe->user_data = reinterpret_cast<uintptr_t>(&p);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume this coroutine from timeout. Do nothing.
+    static constexpr auto await_resume() noexcept -> void {}
+
+private:
+    __kernel_timespec m_time;
+};
+
 } // namespace nyaio
