@@ -1498,4 +1498,81 @@ private:
     uint64_t m_offset;
 };
 
+/// @class recv_awaitable
+/// @brief
+///   Awaitable object for async recv operation.
+class [[nodiscard]] recv_awaitable {
+public:
+    /// @brief
+    ///   Create a new @c recv_awaitable for async recv operation.
+    /// @param socket
+    ///   The socket to receive data from.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store data received from the socket.
+    /// @param size
+    ///   Maximum available size in byte of @c buffer.
+    /// @param flags
+    ///   Flags for this async recv operation. See linux manual for @c recv for details.
+    recv_awaitable(int socket, void *buffer, uint32_t size, int flags) noexcept
+        : m_promise(), m_socket(socket), m_size(size), m_buffer(buffer), m_flags(flags) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async recv operation and suspend the coroutine.
+    /// @tparam Promise
+    ///   Promise type of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be suspended.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        m_promise    = std::addressof(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(m_promise->worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_RECV;
+        sqe->fd        = m_socket;
+        sqe->addr      = reinterpret_cast<uintptr_t>(m_buffer);
+        sqe->len       = m_size;
+        sqe->msg_flags = static_cast<uint32_t>(m_flags);
+        sqe->user_data = reinterpret_cast<uintptr_t>(m_promise);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume the coroutine and get result of the async recv operation.
+    /// @return
+    ///   An @c std::expected object that contains actual bytes received from the socket.
+    ///   @c std::errc is returned as error code if the write operation failed.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
+        int ret = m_promise->io_uring_result();
+        if (ret < 0) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(-ret));
+        return static_cast<uint32_t>(ret);
+    }
+
+private:
+    detail::promise_base *m_promise;
+    int m_socket;
+    uint32_t m_size;
+    void *m_buffer;
+    int m_flags;
+};
+
 } // namespace nyaio
