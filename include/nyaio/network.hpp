@@ -443,4 +443,202 @@ private:
     uint32_t m_scope_id;
 };
 
+/// @brief
+///   IPv4 loopback address.
+inline constexpr ip_address ipv4_loopback(127, 0, 0, 1);
+
+/// @brief
+///   IPv4 broadcast address.
+inline constexpr ip_address ipv4_broadcast(255, 255, 255, 255);
+
+/// @brief
+///   IPv4 address that listens to any incoming address.
+inline constexpr ip_address ipv4_any(0, 0, 0, 0);
+
+/// @brief
+///   IPv6 loopback address.
+inline constexpr ip_address ipv6_loopback(0, 0, 0, 0, 0, 0, 0, 1);
+
+/// @brief
+///   IPv6 address that listens to any incoming address.
+inline constexpr ip_address ipv6_any(0, 0, 0, 0, 0, 0, 0, 0);
+
+/// @class inet_address
+/// @brief
+///   Wrapper class for Internet socket address. This class could be directly used as @c sockaddr_in
+///   and @c sockaddr_in6.
+class [[nodiscard]] inet_address {
+public:
+    /// @brief
+    ///   Create an empty Internet address. Empty Internet address cannot be used for any network
+    ///   operation.
+    constexpr inet_address() noexcept : m_addr() {}
+
+    /// @brief
+    ///   Create a new Internet address from an IP address and port.
+    /// @param ip
+    ///   IP address of this Internet address.
+    /// @param port
+    ///   Port number in host endian.
+    constexpr inet_address(const ip_address &ip, uint16_t port) noexcept : m_addr() {
+        if (ip.is_ipv4()) {
+            m_addr.v4.sin_family = AF_INET;
+            m_addr.v4.sin_port   = detail::to_network_endian(port);
+            m_addr.v4.sin_addr   = ip.m_addr.v4;
+        } else {
+            m_addr.v6.sin6_family   = AF_INET6;
+            m_addr.v6.sin6_port     = detail::to_network_endian(port);
+            m_addr.v6.sin6_flowinfo = detail::to_network_endian<uint32_t>(0);
+            m_addr.v6.sin6_addr     = ip.m_addr.v6;
+            m_addr.v6.sin6_scope_id = detail::to_network_endian(ip.m_scope_id);
+        }
+    }
+
+    /// @brief
+    ///   @c inet_address is trivially copyable.
+    /// @param other
+    ///   The Internet address to be copied from.
+    constexpr inet_address(const inet_address &other) noexcept = default;
+
+    /// @brief
+    ///   @c inet_address is trivially movable.
+    /// @param other
+    ///   The Internet address to be moved from.
+    constexpr inet_address(inet_address &&other) noexcept = default;
+
+    /// @brief
+    ///   @c inet_address is trivially destructible.
+    constexpr ~inet_address() = default;
+
+    /// @brief
+    ///   @c inet_address is trivially copyable.
+    /// @param other
+    ///   The Internet address to be copied from.
+    /// @return
+    ///   Reference to this Internet address.
+    constexpr auto operator=(const inet_address &other) noexcept -> inet_address & = default;
+
+    /// @brief
+    ///   @c inet_address is trivially movable.
+    /// @param other
+    ///   The Internet address to be moved from.
+    /// @return
+    ///   Reference to this Internet address.
+    constexpr auto operator=(inet_address &&other) noexcept -> inet_address & = default;
+
+    /// @brief
+    ///   Checks if this is an IPv4 Internet address.
+    /// @retval true
+    ///   This is an IPv4 Internet address.
+    /// @retval false
+    ///   This is not an IPv4 Internet address.
+    [[nodiscard]]
+    constexpr auto is_ipv4() const noexcept -> bool {
+        return m_addr.v4.sin_family == AF_INET;
+    }
+    /// @brief
+    ///   Checks if this is an IPv6 Internet address.
+    /// @retval true
+    ///   This is an IPv6 Internet address.
+    /// @retval false
+    ///   This is not an IPv6 Internet address.
+    [[nodiscard]]
+    constexpr auto is_ipv6() const noexcept -> bool {
+        return m_addr.v6.sin6_family == AF_INET6;
+    }
+
+    /// @brief
+    ///   Get IP address of this Internet address. It is undefined behavior to get IP address from
+    ///   empty Internet address.
+    /// @return
+    ///   IP address of this Internet address.
+    [[nodiscard]]
+    constexpr auto ip() const noexcept -> ip_address {
+        if (m_addr.v4.sin_family == AF_INET) {
+            ip_address addr;
+            addr.m_addr.v4  = m_addr.v4.sin_addr;
+            addr.m_is_ipv6  = false;
+            addr.m_scope_id = 0;
+            return addr;
+        } else if (m_addr.v6.sin6_family == AF_INET6) {
+            ip_address addr;
+            addr.m_addr.v6  = m_addr.v6.sin6_addr;
+            addr.m_is_ipv6  = true;
+            addr.m_scope_id = detail::to_host_endian(m_addr.v6.sin6_scope_id);
+            return addr;
+        } else [[unlikely]] {
+            return {};
+        }
+    }
+
+    /// @brief
+    ///   Get port of this Internet address. It is undefined behavior to get port number from empty
+    ///   Internet address.
+    /// @return
+    ///   Port number in host endian.
+    [[nodiscard]]
+    constexpr auto port() const noexcept -> uint16_t {
+        return detail::to_host_endian(m_addr.v4.sin_port);
+    }
+
+    /// @brief
+    ///   Set port of this Internet address.
+    /// @param port
+    ///   The port in host endian to be set.
+    constexpr auto set_port(uint16_t port) noexcept -> void {
+        m_addr.v4.sin_port = detail::to_network_endian(port);
+    }
+
+    /// @brief
+    ///   Get IPv6 flow label.
+    /// @return
+    ///   IPv6 flow label. The return value is undefined if this is not an IPv6 address.
+    [[nodiscard]]
+    constexpr auto flow_label() const noexcept -> uint32_t {
+        return detail::to_host_endian(m_addr.v6.sin6_flowinfo);
+    }
+
+    /// @brief
+    ///   Set flow label for this IPv6 Internet address. It is undefined behavior to set flow label
+    ///   for IPv4 address.
+    /// @param label
+    ///   The flow label in host endian to be set.
+    constexpr auto set_flow_label(uint32_t label) noexcept -> void {
+        m_addr.v6.sin6_flowinfo = detail::to_network_endian(label);
+    }
+
+    /// @brief
+    ///   Get IPv6 scope ID.
+    /// @return
+    ///   IPv6 scope ID in host endian. It is undefined behavior to get scope ID from IPv4 Internet
+    ///   address.
+    [[nodiscard]]
+    constexpr auto scope_id() const noexcept -> uint32_t {
+        return detail::to_host_endian(m_addr.v6.sin6_scope_id);
+    }
+
+    /// @brief
+    ///   Set scope ID for this IPv6 Internet address. It is undefined behavior to set scope ID for
+    ///   IPv4 Internet address.
+    /// @param id
+    ///   The scope ID in host endian to be set.
+    constexpr auto set_scope_id(uint32_t id) noexcept -> void {
+        m_addr.v6.sin6_scope_id = detail::to_network_endian(id);
+    }
+
+    /// @brief
+    ///   Checks if two @c inet_address are exactly equal.
+    friend constexpr auto operator==(const inet_address &lhs,
+                                     const inet_address &rhs) noexcept -> bool {
+        const size_t size = lhs.is_ipv4() ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
+        return !__builtin_memcmp(&lhs, &rhs, size);
+    }
+
+private:
+    union {
+        sockaddr_in v4;
+        sockaddr_in6 v6;
+    } m_addr;
+};
+
 } // namespace nyaio
