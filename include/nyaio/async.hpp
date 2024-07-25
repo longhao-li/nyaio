@@ -9,6 +9,7 @@
 #include <thread>
 
 #include <linux/io_uring.h>
+#include <sys/socket.h>
 
 namespace nyaio::detail {
 
@@ -114,6 +115,7 @@ public:
             m_sq.sqe_tail      = next;
 
             // Initialize the new sqe.
+            // It is possible to optimize this as 4 movaps instructions, but I am too lazy to do so.
             __builtin_memset(sqe, 0, sizeof(io_uring_sqe));
             return sqe;
         }
@@ -158,7 +160,7 @@ public:
     NYAIO_API auto wait_cqe() noexcept -> io_uring_cqe *;
 
     /// @brief
-    ///   Marks that @p count @c io_uring_cqes are consumed and could be overriden.
+    ///   Marks that @p count @c io_uring_cqes are consumed and could be overridden.
     /// @param count
     ///   Number of completion queue entries to be consumed.
     auto consume_cqes(unsigned count) noexcept -> void {
@@ -1650,6 +1652,79 @@ private:
     uint32_t m_size;
     const void *m_data;
     int m_flags;
+};
+
+/// @class connect_awaitable
+/// @brief
+///   Awaitable object for async connect operation.
+class [[nodiscard]] connect_awaitable {
+public:
+    /// @brief
+    ///   Create a new @c connect_awaitable object for async connect operation.
+    /// @param socket
+    ///   The socket to connect to peer address.
+    /// @param addr
+    ///   Pointer to the @c sockaddr object that contains the peer address.
+    /// @param addrlen
+    ///   Size in byte of the @c sockaddr object.
+    connect_awaitable(int socket, const sockaddr *addr, socklen_t addrlen) noexcept
+        : m_promise(), m_socket(socket), m_addr(addr), m_addrlen(addrlen) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async connect operation and suspend the coroutine.
+    /// @tparam Promise
+    ///   Promise type of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be suspended.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        m_promise    = std::addressof(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(m_promise->worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode    = IORING_OP_CONNECT;
+        sqe->fd        = m_socket;
+        sqe->addr      = reinterpret_cast<uintptr_t>(m_addr);
+        sqe->len       = m_addrlen;
+        sqe->user_data = reinterpret_cast<uintptr_t>(m_promise);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume the coroutine and get result of the async connect operation.
+    /// @return
+    ///   An empty @c std::expected object if succeeded. @c std::errc is returned as error code if
+    ///   the connect operation failed.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> std::errc {
+        int ret = m_promise->io_uring_result();
+        if (ret < 0) [[unlikely]]
+            return static_cast<std::errc>(-ret);
+        return {};
+    }
+
+private:
+    detail::promise_base *m_promise;
+    int m_socket;
+    const sockaddr *m_addr;
+    socklen_t m_addrlen;
 };
 
 } // namespace nyaio
