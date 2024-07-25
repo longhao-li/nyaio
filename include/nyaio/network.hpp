@@ -6,6 +6,8 @@
 #include <string_view>
 
 #include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <unistd.h>
 
 namespace nyaio {
 namespace detail {
@@ -548,6 +550,16 @@ public:
     }
 
     /// @brief
+    ///   Get actual size in byte of this Internet address object.
+    /// @return
+    ///   Actual size in byte of this Internet address object. It is undefined behavior to get size
+    ///   for empty Internet address object.
+    [[nodiscard]]
+    constexpr auto size() const noexcept -> socklen_t {
+        return is_ipv4() ? sizeof(sockaddr_in) : sizeof(sockaddr_in6);
+    }
+
+    /// @brief
     ///   Get IP address of this Internet address. It is undefined behavior to get IP address from
     ///   empty Internet address.
     /// @return
@@ -639,6 +651,295 @@ private:
         sockaddr_in v4;
         sockaddr_in6 v6;
     } m_addr;
+};
+
+/// @class tcp_stream
+/// @brief
+///   Wrapper class for TCP connection. This class is used for TCP socket IO.
+class tcp_stream {
+public:
+    /// @brief
+    ///   Create an empty @c tcp_stream. Empty @c tcp_stream object cannot be used for IO
+    ///   operations.
+    tcp_stream() noexcept : m_socket(-1), m_addr() {}
+
+    /// @brief
+    ///   For internal usage. Wrap a raw socket file descriptor and address as a @c tcp_stream.
+    /// @param socket
+    ///   Socket file descriptor of the TCP connection.
+    /// @param addr
+    ///   Address of peer endpoint.
+    tcp_stream(int socket, const inet_address &addr) noexcept : m_socket(socket), m_addr(addr) {}
+
+    /// @brief
+    ///   @c tcp_stream is not copyable.
+    tcp_stream(const tcp_stream &other) = delete;
+
+    /// @brief
+    ///   Move constructor of @c tcp_stream.
+    /// @param[in, out] other
+    ///   The @c tcp_stream object to be moved. The moved object will be empty and can not be used
+    ///   for IO operations.
+    tcp_stream(tcp_stream &&other) noexcept : m_socket(other.m_socket), m_addr(other.m_addr) {
+        other.m_socket = -1;
+    }
+
+    /// @brief
+    ///   Close the TCP connection and destroy this object.
+    ~tcp_stream() {
+        if (m_socket != -1)
+            ::close(m_socket);
+    }
+
+    /// @brief
+    ///   @c tcp_stream is not copyable.
+    auto operator=(const tcp_stream &other) = delete;
+
+    /// @brief
+    ///   Move assignment of @c tcp_stream.
+    /// @param[in, out] other
+    ///   The @c tcp_stream object to be moved. The moved object will be empty and can not be used
+    ///   for IO operations.
+    /// @return
+    ///   Reference to this @c tcp_stream.
+    auto operator=(tcp_stream &&other) noexcept -> tcp_stream & {
+        if (this == &other) [[unlikely]]
+            return *this;
+
+        if (m_socket != -1)
+            ::close(m_socket);
+
+        m_socket = other.m_socket;
+        m_addr   = other.m_addr;
+
+        other.m_socket = -1;
+        return *this;
+    }
+
+    /// @brief
+    ///   Connect to the specified peer address. This method will block current thread until the
+    ///   connection is established or any error occurs. If this TCP stream is currently not empty,
+    ///   the old connection will be closed once the new connection is established. The old
+    ///   connection will not be closed if the new connection fails.
+    /// @param addr
+    ///   Peer Internet address to connect.
+    /// @return
+    ///   Error code of the connect operation. The error code is 0 if succeeded.
+    NYAIO_API auto connect(const inet_address &addr) noexcept -> std::errc;
+
+    /// @brief
+    ///   Connect to the specified peer address. This method will suspend this coroutine until the
+    ///   new connection is established or any error occurs. If this TCP stream is currently not
+    ///   empty, the old connection will be closed once the new connection is established. The old
+    ///   connection will not be closed if the new connection fails.
+    /// @param addr
+    ///   Peer Internet address to connect.
+    /// @return
+    ///   Error code of the connect operation. The error code is 0 if succeeded.
+    NYAIO_API auto connect_async(const inet_address &addr) noexcept -> task<std::errc>;
+
+    /// @brief
+    ///   Receive data from peer TCP endpoint. This method will block current thread until any data
+    ///   is received or error occurs.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received.
+    /// @return
+    ///   Actual size in byte of data received if succeeded. Otherwise, return an system error code.
+    auto receive(void *buffer, uint32_t size) const noexcept -> std::expected<uint32_t, std::errc> {
+        ssize_t result = ::recv(m_socket, buffer, size, 0);
+        if (result == -1) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(errno));
+        return static_cast<uint32_t>(result);
+    }
+
+    /// @brief
+    ///   Receive data from peer TCP endpoint. This method always returns immediately.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received.
+    /// @return
+    ///   Actual size in byte of data received if succeeded. Otherwise, return an system error code.
+    ///   This method returns @c std::errc::resource_unavailable_try_again or
+    ///   @c std::errc::operation_would_block if there is no data available currently.
+    auto receive_nonblock(void *buffer,
+                          uint32_t size) const noexcept -> std::expected<uint32_t, std::errc> {
+        ssize_t result = ::recv(m_socket, buffer, size, MSG_DONTWAIT);
+        if (result == -1) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(errno));
+        return static_cast<uint32_t>(result);
+    }
+
+    /// @brief
+    ///   Async receive data from peer TCP endpoint. This method will suspend this coroutine until
+    ///   any data is received or any error occurs.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received.
+    /// @return
+    ///   Actual size in byte of data received if succeeded. Otherwise, return an system error code.
+    [[nodiscard]]
+    auto receive_async(void *buffer, uint32_t size) const noexcept -> recv_awaitable {
+        return {m_socket, buffer, size, 0};
+    }
+
+    /// @brief
+    ///   Send data to peer TCP endpoint. This method will block current thread until all data is
+    ///   sent or any error occurs.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent.
+    /// @return
+    ///   Actual size in byte of data sent if succeeded. Otherwise, return an system error code.
+    auto send(const void *data,
+              uint32_t size) const noexcept -> std::expected<uint32_t, std::errc> {
+        ssize_t result = ::send(m_socket, data, size, MSG_NOSIGNAL);
+        if (result == -1) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(errno));
+        return static_cast<uint32_t>(result);
+    }
+
+    /// @brief
+    ///   Send data to peer TCP endpoint. This method always returns immediately.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent.
+    /// @return
+    ///   Actual size in byte of data sent if succeeded. Otherwise, return an system error code.
+    ///   This method returns @c std::errc::resource_unavailable_try_again or
+    ///   @c std::errc::operation_would_block if send buffer is currently not available.
+    auto send_nonblock(const void *data,
+                       uint32_t size) const noexcept -> std::expected<uint32_t, std::errc> {
+        ssize_t result = ::send(m_socket, data, size, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (result == -1) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(errno));
+        return static_cast<uint32_t>(result);
+    }
+
+    /// @brief
+    ///   Async send data to peer TCP endpoint. This method will suspend this coroutine until any
+    ///   data is sent or any error occurs.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent.
+    /// @return
+    ///   Actual size in byte of data sent if succeeded. Otherwise, return an system error code.
+    [[nodiscard]]
+    auto send_async(const void *data, uint32_t size) const noexcept -> send_awaitable {
+        return {m_socket, data, size, MSG_NOSIGNAL};
+    }
+
+    /// @brief
+    ///   Enable or disable keepalive for this TCP connection.
+    /// @param enable
+    ///   Specifies whether to enable or disable keepalive for this TCP stream.
+    /// @return
+    ///   An error code that indicates whether succeeded to enable or disable keepalive for this TCP
+    ///   stream. The error code is 0 if succeeded to set keepalive attribute for this TCP stream.
+    auto set_keepalive(bool enable) noexcept -> std::errc {
+        const int v = enable ? 1 : 0;
+        if (::setsockopt(m_socket, SOL_SOCKET, SO_KEEPALIVE, &v, sizeof(v)) == -1) [[unlikely]]
+            return static_cast<std::errc>(errno);
+        return {};
+    }
+
+    /// @brief
+    ///   Enable or disable nodelay for this TCP stream.
+    /// @param enable
+    ///   Specifies whether to enable or disable nodelay for this TCP stream.
+    /// @return
+    ///   An error code that indicates whether succeeded to enable or disable nodelay for this TCP
+    ///   stream. The error code is 0 if succeeded to set nodelay attribute for this TCP stream.
+    auto set_nodelay(bool enable) noexcept -> std::errc {
+        const int v = enable ? 1 : 0;
+        if (::setsockopt(m_socket, SOL_TCP, TCP_NODELAY, &v, sizeof(v)) == -1) [[unlikely]]
+            return static_cast<std::errc>(errno);
+        return {};
+    }
+
+    /// @brief
+    ///   Set timeout event for receive operation. @c tcp_stream::receive and
+    ///   @c tcp_stream::receive_async may generate an error that indicates the timeout event if
+    ///   timeout event occurs. The TCP connection may be in an undefined state and should be closed
+    ///   if receive timeout event occurs.
+    /// @tparam Rep
+    ///   Type representation of duration type. See @c std::chrono::duration for details.
+    /// @tparam Period
+    ///   Ratio type that is used to measure how to do conversion between different duration types.
+    ///   See @c std::chrono::duration for details.
+    /// @param duration
+    ///   Timeout duration of receive operation. Ratios less than microseconds are not allowed.
+    /// @return
+    ///   An error code that indicates whether succeeded to set the timeout event. The error code is
+    ///   0 if succeeded to set or remove receive timeout event for this TCP connection.
+    template <class Rep, class Period>
+        requires(std::ratio_greater_equal_v<std::micro, Period>)
+    auto set_receive_timeout(std::chrono::duration<Rep, Period> duration) noexcept -> std::errc {
+        auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration);
+        auto count        = static_cast<uint64_t>(microseconds.count());
+
+        const timeval t{
+            .tv_sec  = static_cast<uint32_t>(count / 1000000),
+            .tv_usec = static_cast<uint32_t>(count % 1000000),
+        };
+
+        if (::setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof(t)) == -1) [[unlikely]]
+            return static_cast<std::errc>(errno);
+
+        return {};
+    }
+
+    /// @brief
+    ///   Set timeout event for send operation. @c tcp_stream::send and @c tcp_stream::send_async
+    ///   may generate an error that indicates the timeout event if timeout event occurs. The TCP
+    ///   connection may be in an undefined state and should be closed if send timeout event occurs.
+    /// @tparam Rep
+    ///   Type representation of duration type. See @c std::chrono::duration for details.
+    /// @tparam Period
+    ///   Ratio type that is used to measure how to do conversion between different duration types.
+    ///   See @c std::chrono::duration for details.
+    /// @param duration
+    ///   Timeout duration of send operation. Ratios less than microseconds are not allowed.
+    /// @return
+    ///   An error code that indicates whether succeeded to set the timeout event. The error code is
+    ///   0 if succeeded to set or remove send timeout event for this TCP connection.
+    template <class Rep, class Period>
+        requires(std::ratio_greater_equal_v<std::micro, Period>)
+    auto set_send_timeout(std::chrono::duration<Rep, Period> duration) noexcept -> std::errc {
+        auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(duration);
+        auto count        = static_cast<uint64_t>(microseconds.count());
+
+        const timeval t{
+            .tv_sec  = static_cast<uint32_t>(count / 1000000),
+            .tv_usec = static_cast<uint32_t>(count % 1000000),
+        };
+
+        if (::setsockopt(m_socket, SOL_SOCKET, SO_SNDTIMEO, &t, sizeof(t)) == -1) [[unlikely]]
+            return static_cast<std::errc>(errno);
+
+        return {};
+    }
+
+    /// @brief
+    ///   Close this TCP stream and release all resources. Closing a TCP stream with pending IO
+    ///   requirements may cause errors for the IO results. This method does nothing if current TCP
+    ///   stream is empty.
+    auto close() noexcept -> void {
+        if (m_socket != -1) {
+            ::close(m_socket);
+            m_socket = -1;
+        }
+    }
+
+private:
+    int m_socket;
+    inet_address m_addr;
 };
 
 } // namespace nyaio
