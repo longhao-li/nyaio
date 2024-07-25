@@ -1727,4 +1727,83 @@ private:
     socklen_t m_addrlen;
 };
 
+/// @class accept_awaitable
+/// @brief
+///   Awaitable object for async connect operation.
+class [[nodiscard]] accept_awaitable {
+public:
+    /// @brief
+    ///   Create a new @c accept_awaitable object for async accept operation.
+    /// @param socket
+    ///   The server socket to accept incoming connections.
+    /// @param[out] addr
+    ///   Optional. Pointer to the @c sockaddr object that is used to store the peer address if
+    ///   succeeded to accept incoming connection.
+    /// @param[in, out] addrlen
+    ///   Optional. This value should contain maximum available size of @c addr when passing as the
+    ///   parameter and the value will be set to actual size of @c addr if succeeded to accept
+    ///   incoming connection.
+    /// @param flags
+    ///   Flags for this async accept operation. See linux manual @c accept4 for details.
+    accept_awaitable(int socket, sockaddr *addr, socklen_t *addrlen, int flags) noexcept
+        : m_promise(), m_socket(socket), m_addr(addr), m_addrlen(addrlen), m_flags(flags) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async accept operation and suspend the coroutine.
+    /// @tparam Promise
+    ///   Promise type of the coroutine to be suspended.
+    /// @param coro
+    ///   Coroutine handle of the coroutine to be suspended.
+    template <class Promise>
+        requires(std::is_base_of_v<detail::promise_base, Promise>)
+    auto await_suspend(std::coroutine_handle<Promise> coro) noexcept -> void {
+        m_promise    = std::addressof(coro.promise());
+        auto *worker = static_cast<io_context_worker *>(m_promise->worker());
+        auto &ring   = worker->poller();
+
+        io_uring_sqe *sqe = ring.poll_sqe();
+        while (sqe == nullptr) [[unlikely]] {
+            ring.submit();
+            sqe = ring.poll_sqe();
+        }
+
+        sqe->opcode       = IORING_OP_ACCEPT;
+        sqe->fd           = m_socket;
+        sqe->addr         = reinterpret_cast<uintptr_t>(m_addr);
+        sqe->off          = reinterpret_cast<uintptr_t>(m_addrlen);
+        sqe->accept_flags = static_cast<uint32_t>(m_flags);
+
+        ring.flush_sq();
+    }
+
+    /// @brief
+    ///   Resume the coroutine and get result of the async accept operation.
+    /// @return
+    ///   Return a socket handle that represents a new incoming connection if succeeded.
+    ///   @c std::errc is returned as error code if failed to accept a new incoming connection.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> std::expected<int, std::errc> {
+        int ret = m_promise->io_uring_result();
+        if (ret < 0) [[unlikely]]
+            return std::unexpected(static_cast<std::errc>(-ret));
+        return ret;
+    }
+
+private:
+    detail::promise_base *m_promise;
+    int m_socket;
+    sockaddr *m_addr;
+    socklen_t *m_addrlen;
+    int m_flags;
+};
+
 } // namespace nyaio
