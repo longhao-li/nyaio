@@ -28,6 +28,9 @@ else()
     target_compile_definitions(nyaio PUBLIC "NYAIO_API=")
 endif()
 
+# Alias target to be consistent with the package name.
+add_library(nyaio::nyaio ALIAS nyaio)
+
 # This project uses some C++23 features.
 target_compile_features(nyaio PUBLIC cxx_std_23)
 
@@ -52,4 +55,50 @@ target_include_directories(
     PUBLIC  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:include>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+# Configure the package.
+include(GNUInstallDirs)
+
+install(
+    TARGETS     nyaio
+    EXPORT      nyaio-targets
+    RUNTIME     DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY     DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE     DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    INCLUDES    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+install(
+    EXPORT      nyaio-targets
+    FILE        nyaio-targets.cmake
+    NAMESPACE   nyaio::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/nyaio
+)
+
+# Generate the package configuration file.
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/nyaio-config.cmake.in
+    ${CMAKE_CURRENT_BINARY_DIR}/nyaio-config.cmake
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/nyaio
+)
+
+write_basic_package_version_file(
+    nyaio-config-version.cmake
+    VERSION ${PACKAGE_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(
+    FILES       ${CMAKE_CURRENT_BINARY_DIR}/nyaio-config.cmake
+                ${CMAKE_CURRENT_BINARY_DIR}/nyaio-config-version.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/nyaio
+)
+
+# Install the header files.
+install(
+    DIRECTORY   ${CMAKE_CURRENT_SOURCE_DIR}/include/nyaio
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
