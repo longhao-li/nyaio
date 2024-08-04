@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 
 project(nyaio VERSION 0.0.0 LANGUAGES CXX)
 
@@ -7,8 +7,9 @@ if(${PROJECT_SOURCE_DIR} STREQUAL ${PROJECT_BINARY_DIR})
     message(FATAL_ERROR "In-source build is not allowed.")
 endif()
 
-option(NYAIO_BUILD_SHARED_LIBS "Build nyaio as shared library. The CMake BUILD_SHARED_LIBS option does not affect this project." OFF)
+option(NYAIO_BUILD_SHARED_LIBS  "Build nyaio as shared library. The CMake BUILD_SHARED_LIBS option does not affect this project." OFF)
 option(NYAIO_WARNINGS_AS_ERRORS "Treat warnings as errors when building nyaio." OFF)
+option(NYAIO_BUILD_TESTS        "Build tests for nyaio." OFF)
 
 file(GLOB_RECURSE NYAIO_HEADER_FILES "include/nyaio/*.hpp")
 file(GLOB_RECURSE NYAIO_SOURCE_FILES "src/nyaio/*.cpp")
@@ -102,3 +103,30 @@ install(
     DIRECTORY   ${CMAKE_CURRENT_SOURCE_DIR}/include/nyaio
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+
+# Build tests.
+if(NYAIO_BUILD_TESTS)
+    # Find doctest
+    message(STATUS "Fetching doctest from github.com/doctest/doctest")
+    include(FetchContent)
+
+    set(DOCTEST_NO_INSTALL ON)
+    FetchContent_Declare(
+        doctest
+        GIT_REPOSITORY https://github.com/doctest/doctest
+        GIT_TAG        v2.4.11
+    )
+
+    FetchContent_MakeAvailable(doctest)
+
+    # Build test target
+    file(GLOB_RECURSE NYAIO_TEST_FILES "test/*.cpp")
+    add_executable(nyaio-test ${NYAIO_TEST_FILES})
+
+    target_link_libraries(nyaio-test PRIVATE nyaio doctest::doctest)
+
+    # Configure CMake tests
+    enable_testing()
+    include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
+    doctest_discover_tests(nyaio-test)
+endif()
