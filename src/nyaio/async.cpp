@@ -81,7 +81,7 @@ static auto nyaio_io_uring_enter(int fd, unsigned to_submit, unsigned min_comple
                      : "=a"(rax)
                      : [sig] "m"(sig), [nsig] "m"(nsig), [flags] "m"(flags_ptr),
                        "a"(__NR_io_uring_enter), "D"(fd), "S"(to_submit), "d"(min_complete)
-                     : "rcx", "r11", "memory");
+                     : "rcx", "r8", "r9", "r10", "r11", "memory");
 
     return static_cast<int>(rax);
 #elif defined(__i386__)
