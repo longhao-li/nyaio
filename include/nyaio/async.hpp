@@ -260,7 +260,8 @@ public:
                 return std::noop_coroutine();
 
             // The caller coroutine should be resumed.
-            if (p.notify() == 1)
+            auto *cp = p.m_caller_promise;
+            if (cp->notify() == 1)
                 return p.m_caller;
 
             return std::noop_coroutine();
@@ -563,7 +564,7 @@ private:
 ///   Return type of this coroutine.
 /// @brief
 ///   @c Task is a wrapper of coroutine that can be awaited.
-template <class T>
+template <class T = void>
 class task {
 public:
     using value_type       = T;
@@ -587,7 +588,7 @@ public:
     ///   Copy constructor of @c task. Reference counting is used.
     /// @param other
     ///   The @c task to be copied.
-    task(const task &other) noexcept : m_coroutine(), m_promise(other.m_promise) {
+    task(const task &other) noexcept : m_coroutine(other.m_coroutine), m_promise(other.m_promise) {
         // Add reference count.
         if (m_coroutine != nullptr)
             m_promise->acquire();
@@ -1238,7 +1239,7 @@ public:
     ///   Create a new awaitable for scheduling a new task.
     /// @param t
     ///   The task to be scheduled.
-    schedule_awaitable(task<T> &&t) noexcept : m_task(std::move(t)) {}
+    schedule_awaitable(task<T> t) noexcept : m_task(std::move(t)) {}
 
     /// @brief
     ///   C++20 coroutine API method. Always execute @c await_suspend().
@@ -1268,7 +1269,7 @@ public:
     }
 
     /// @brief
-    ///   Resume this coroutine from timeout. Do nothing.
+    ///   Resume this coroutine. Do nothing.
     static constexpr auto await_resume() noexcept -> void {}
 
 private:
@@ -1289,13 +1290,16 @@ public:
     ///   Ratio type that is used to measure how to do conversion between different duration types.
     ///   See @c std::chrono::duration for details.
     /// @param duration
-    ///   Timeout duration. Ratios less than nanoseconds are not allowed.
+    ///   Timeout duration. Ratios greater than nanoseconds are not allowed.
     template <class Rep, class Period>
-        requires(std::ratio_greater_equal_v<std::nano, Period>)
+        requires(std::ratio_less_equal_v<std::nano, Period>)
     explicit timeout_awaitable(std::chrono::duration<Rep, Period> duration) noexcept : m_time() {
         auto nanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(duration).count();
-        m_time.tv_sec    = nanoseconds / 1000000000ULL;
-        m_time.tv_nsec   = nanoseconds % 1000000000ULL;
+        if (nanoseconds < 0) [[unlikely]]
+            return;
+
+        m_time.tv_sec  = static_cast<uint64_t>(nanoseconds) / 1000000000ULL;
+        m_time.tv_nsec = static_cast<uint64_t>(nanoseconds) % 1000000000ULL;
     }
 
     /// @brief
@@ -1326,11 +1330,12 @@ public:
             sqe = ring.poll_sqe();
         }
 
-        sqe->opcode    = IORING_OP_TIMEOUT;
-        sqe->fd        = -1;
-        sqe->addr      = reinterpret_cast<uintptr_t>(&m_time);
-        sqe->len       = sizeof(m_time);
-        sqe->user_data = reinterpret_cast<uintptr_t>(&p);
+        sqe->opcode        = IORING_OP_TIMEOUT;
+        sqe->fd            = -1;
+        sqe->addr          = reinterpret_cast<uintptr_t>(&m_time);
+        sqe->len           = 1;
+        sqe->user_data     = reinterpret_cast<uintptr_t>(&p);
+        sqe->timeout_flags = IORING_TIMEOUT_ETIME_SUCCESS;
 
         ring.flush_sq();
     }
