@@ -538,6 +538,7 @@ public:
     constexpr auto is_ipv4() const noexcept -> bool {
         return m_addr.v4.sin_family == AF_INET;
     }
+
     /// @brief
     ///   Checks if this is an IPv6 Internet address.
     /// @retval true
@@ -930,6 +931,128 @@ public:
     ///   Close this TCP stream and release all resources. Closing a TCP stream with pending IO
     ///   requirements may cause errors for the IO results. This method does nothing if current TCP
     ///   stream is empty.
+    auto close() noexcept -> void {
+        if (m_socket != -1) {
+            ::close(m_socket);
+            m_socket = -1;
+        }
+    }
+
+private:
+    int m_socket;
+    inet_address m_addr;
+};
+
+/// @class tcp_server
+/// @brief
+///   Wrapper class for TCP server. This class is used for accepting incoming TCP connections.
+class tcp_server {
+public:
+    /// @brief
+    ///   Create an empty @c tcp_server. Empty @c tcp_server object cannot be used for accepting new
+    ///   TCP connections.
+    tcp_server() noexcept : m_socket(-1), m_addr() {}
+
+    /// @brief
+    ///   @c tcp_server is not copyable.
+    tcp_server(const tcp_server &other) = delete;
+
+    /// @brief
+    ///   Move constructor of @c tcp_server.
+    /// @param[in, out] other
+    ///   The @c tcp_server object to be moved from. The moved object will be empty and can not be
+    ///   used for accepting new TCP connections.
+    tcp_server(tcp_server &&other) noexcept : m_socket(other.m_socket), m_addr(other.m_addr) {
+        other.m_socket = -1;
+    }
+
+    /// @brief
+    ///   Stop listening to incoming TCP connections and destroy this object.
+    ~tcp_server() {
+        if (m_socket != -1)
+            ::close(m_socket);
+    }
+
+    /// @brief
+    ///   @c tcp_server is not copyable.
+    auto operator=(const tcp_server &other) = delete;
+
+    /// @brief
+    ///   Move assignment of @c tcp_server.
+    /// @param[in, out] other
+    ///   The @c tcp_server object to be moved from. The moved object will be empty and can not be
+    ///   used for accepting new TCP connections.
+    /// @return
+    ///   Reference to this @c tcp_server.
+    auto operator=(tcp_server &&other) noexcept -> tcp_server & {
+        if (this == &other) [[unlikely]]
+            return *this;
+
+        if (m_socket != -1)
+            ::close(m_socket);
+
+        m_socket = other.m_socket;
+        m_addr   = other.m_addr;
+
+        other.m_socket = -1;
+        return *this;
+    }
+
+    /// @brief
+    ///   Start listening to incoming TCP connections. This method will create a new TCP server
+    ///   socket and bind to the specified address. The old TCP server socket will be closed if
+    ///   succeeded to listen to the new address.
+    /// @param address
+    ///   The local address to bind for listening incoming TCP connections.
+    /// @return
+    ///   A system error code that indicates whether succeeded to start listening to incoming TCP
+    ///   connections. The error code is 0 if succeeded to start listening. The original TCP server
+    ///   socket will not be affected if any error occurs.
+    NYAIO_API auto listen(const inet_address &address) noexcept -> std::errc;
+
+    /// @brief
+    ///   Accept a new incoming TCP connection. This method will block current thread until a new
+    ///   TCP connection is established or any error occurs.
+    /// @return
+    ///   A new @c tcp_stream object that represents the new incoming TCP connection if succeeded.
+    ///   Otherwise, return a system error code.
+    [[nodiscard]]
+    NYAIO_API auto accept() const noexcept -> std::expected<tcp_stream, std::errc>;
+
+    /// @brief
+    ///   Async accept a new incoming TCP connection. This method will suspend this coroutine until
+    ///   a new TCP connection is established or any error occurs.
+    /// @note
+    ///   Returning task will allocate heap memory for each async accept operation. It is
+    ///   recommended to use @c tcp_server::acceptor() for better performance.
+    /// @return
+    ///   A new @c tcp_stream object that represents the new incoming TCP connection if succeeded.
+    ///   Otherwise, return a system error code.
+    [[nodiscard]]
+    NYAIO_API auto accept_async() const noexcept -> task<std::expected<tcp_stream, std::errc>>;
+
+    /// @brief
+    ///   Acquire an acceptor object for async accept operation. Acceptor can be used for multiple
+    ///   async accept operations.
+    /// @return
+    ///   An acceptor object that can be used for async accept operation.
+    [[nodiscard]]
+    NYAIO_API auto acceptor() const noexcept -> task<std::expected<tcp_stream, std::errc>>;
+
+    /// @brief
+    ///   Get local listening address.
+    /// @return
+    ///   Local listening address of this TCP server. The return value is undefined if this TCP
+    ///   server is empty.
+    [[nodiscard]]
+    auto address() const noexcept -> const inet_address & {
+        return m_addr;
+    }
+
+    /// @brief
+    ///   Stop listening to incoming TCP connections and close this TCP server. This TCP server will
+    ///   be set to empty after this call. Call @c tcp_server::listen() to start listening to
+    ///   incoming again.
     auto close() noexcept -> void {
         if (m_socket != -1) {
             ::close(m_socket);

@@ -34,7 +34,7 @@ nyaio::ip_address::ip_address(std::string_view addr) : m_addr(), m_is_ipv6(false
     throw_if_error(inet_pton(family, buffer, &m_addr) != 1);
 }
 
-auto nyaio::tcp_stream::connect(const nyaio::inet_address &addr) noexcept -> std::errc {
+auto nyaio::tcp_stream::connect(const inet_address &addr) noexcept -> std::errc {
     auto *a = reinterpret_cast<const sockaddr *>(&addr);
     int s   = ::socket(a->sa_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
     if (s < 0) [[unlikely]]
@@ -55,7 +55,7 @@ auto nyaio::tcp_stream::connect(const nyaio::inet_address &addr) noexcept -> std
     return {};
 }
 
-auto nyaio::tcp_stream::connect_async(const nyaio::inet_address &addr) noexcept -> task<std::errc> {
+auto nyaio::tcp_stream::connect_async(const inet_address &addr) noexcept -> task<std::errc> {
     auto *a = reinterpret_cast<const sockaddr *>(&addr);
     int s   = ::socket(a->sa_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
     if (s < 0) [[unlikely]]
@@ -73,4 +73,73 @@ auto nyaio::tcp_stream::connect_async(const nyaio::inet_address &addr) noexcept 
     m_addr   = addr;
 
     co_return {};
+}
+
+auto nyaio::tcp_server::listen(const inet_address &address) noexcept -> std::errc {
+    auto *a = reinterpret_cast<const sockaddr *>(&address);
+    int s   = ::socket(a->sa_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+
+    if (s == -1) [[unlikely]]
+        return static_cast<std::errc>(errno);
+
+    { // set reuse address and port
+        const int value = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value));
+        setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &value, sizeof(value));
+    }
+
+    if (::bind(s, a, address.size()) == -1) [[unlikely]] {
+        int error = errno;
+        ::close(s);
+        return static_cast<std::errc>(error);
+    }
+
+    if (::listen(s, SOMAXCONN) == -1) [[unlikely]] {
+        int error = errno;
+        ::close(s);
+        return static_cast<std::errc>(error);
+    }
+
+    if (m_socket != -1)
+        ::close(m_socket);
+
+    m_socket = s;
+    m_addr   = address;
+
+    return std::errc{};
+}
+
+auto nyaio::tcp_server::accept() const noexcept -> std::expected<tcp_stream, std::errc> {
+    inet_address addr;
+    socklen_t len = sizeof(addr);
+
+    int socket = ::accept4(m_socket, reinterpret_cast<sockaddr *>(&addr), &len, SOCK_CLOEXEC);
+    if (socket == -1) [[unlikely]]
+        return std::unexpected(static_cast<std::errc>(errno));
+
+    return tcp_stream(socket, addr);
+}
+
+auto nyaio::tcp_server::accept_async() const noexcept
+    -> task<std::expected<tcp_stream, std::errc>> {
+    inet_address addr;
+    socklen_t len = sizeof(addr);
+
+    auto result = co_await accept_awaitable(m_socket, reinterpret_cast<sockaddr *>(&addr), &len,
+                                            SOCK_CLOEXEC);
+    co_return result.transform(
+        [&addr](int socket) noexcept -> tcp_stream { return {socket, addr}; });
+}
+
+auto nyaio::tcp_server::acceptor() const noexcept -> task<std::expected<tcp_stream, std::errc>> {
+    inet_address addr;
+    socklen_t len;
+
+    while (true) {
+        len         = sizeof(addr);
+        auto result = co_await accept_awaitable(m_socket, reinterpret_cast<sockaddr *>(&addr), &len,
+                                                SOCK_CLOEXEC);
+        co_yield result.transform(
+            [&addr](int socket) noexcept -> tcp_stream { return {socket, addr}; });
+    }
 }
