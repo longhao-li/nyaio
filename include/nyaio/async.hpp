@@ -1276,6 +1276,11 @@ private:
     task<T> m_task;
 };
 
+/// @brief
+///   Deduction guide for @c schedule_awaitable.
+template <class T>
+schedule_awaitable(task<T>) -> schedule_awaitable<T>;
+
 /// @class timeout_awaitable
 /// @brief
 ///   Awaitable object for timeout event. This awaitable suspends current coroutine for the
@@ -1410,7 +1415,6 @@ public:
     /// @return
     ///   An @c std::expected object that contains actual bytes read from the file. @c std::errc is
     ///   returned as error code if the read operation failed.
-    [[nodiscard]]
     auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
         int ret = m_promise->io_uring_result();
         if (ret < 0) [[unlikely]]
@@ -1489,7 +1493,6 @@ public:
     /// @return
     ///   An @c std::expected object that contains actual bytes written to the file. @c std::errc is
     ///   returned as error code if the write operation failed.
-    [[nodiscard]]
     auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
         int ret = m_promise->io_uring_result();
         if (ret < 0) [[unlikely]]
@@ -1566,7 +1569,6 @@ public:
     /// @return
     ///   An @c std::expected object that contains actual bytes received from the socket.
     ///   @c std::errc is returned as error code if the write operation failed.
-    [[nodiscard]]
     auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
         int ret = m_promise->io_uring_result();
         if (ret < 0) [[unlikely]]
@@ -1643,7 +1645,6 @@ public:
     /// @return
     ///   An @c std::expected object that contains actual bytes sent to the socket. @c std::errc is
     ///   returned as error code if the send operation failed.
-    [[nodiscard]]
     auto await_resume() const noexcept -> std::expected<uint32_t, std::errc> {
         int ret = m_promise->io_uring_result();
         if (ret < 0) [[unlikely]]
@@ -1717,7 +1718,6 @@ public:
     /// @return
     ///   An empty @c std::expected object if succeeded. @c std::errc is returned as error code if
     ///   the connect operation failed.
-    [[nodiscard]]
     auto await_resume() const noexcept -> std::errc {
         int ret = m_promise->io_uring_result();
         if (ret < 0) [[unlikely]]
