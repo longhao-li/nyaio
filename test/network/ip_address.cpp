@@ -189,3 +189,117 @@ TEST_CASE("ip address ipv4 multicast") {
 
     CHECK(addr.to_ipv4() == addr);
 }
+
+TEST_CASE("ip address ipv6 loopback") {
+    CHECK_NOTHROW(std::ignore = ip_address("::1"));
+    CHECK_THROWS_AS(std::ignore = ip_address(":::"), std::invalid_argument &);
+    CHECK_THROWS_AS(std::ignore = ip_address("FFFF0::"), std::invalid_argument &);
+
+    ip_address addr(0, 0, 0, 0, 0, 0, 0, 1);
+    CHECK(addr == ipv6_loopback);
+    CHECK(addr == ip_address("::1"));
+
+    CHECK(!addr.is_ipv4());
+    CHECK(!addr.is_ipv4_loopback());
+    CHECK(!addr.is_ipv4_any());
+    CHECK(!addr.is_ipv4_broadcast());
+    CHECK(!addr.is_ipv4_private());
+    CHECK(!addr.is_ipv4_linklocal());
+    CHECK(!addr.is_ipv4_multicast());
+
+    CHECK(addr.is_ipv6());
+    CHECK(addr.is_ipv6_loopback());
+    CHECK(!addr.is_ipv6_any());
+    CHECK(!addr.is_ipv6_multicast());
+    CHECK(!addr.is_ipv4_mapped_ipv6());
+
+    CHECK(!addr.to_ipv4().has_value());
+    CHECK(addr.to_ipv6() == addr);
+
+    CHECK(addr.scope_id() == 0);
+    addr.set_scope_id(1234);
+    CHECK(addr.scope_id() == 1234);
+}
+
+TEST_CASE("ip address ipv6 any") {
+    CHECK_NOTHROW(std::ignore = ip_address("::"));
+
+    ip_address addr(0, 0, 0, 0, 0, 0, 0, 0);
+    CHECK(addr == ipv6_any);
+    CHECK(addr == ip_address("::"));
+
+    CHECK(!addr.is_ipv4());
+    CHECK(!addr.is_ipv4_loopback());
+    CHECK(!addr.is_ipv4_any());
+    CHECK(!addr.is_ipv4_broadcast());
+    CHECK(!addr.is_ipv4_private());
+    CHECK(!addr.is_ipv4_linklocal());
+    CHECK(!addr.is_ipv4_multicast());
+
+    CHECK(addr.is_ipv6());
+    CHECK(!addr.is_ipv6_loopback());
+    CHECK(addr.is_ipv6_any());
+    CHECK(!addr.is_ipv6_multicast());
+    CHECK(!addr.is_ipv4_mapped_ipv6());
+
+    CHECK(!addr.to_ipv4().has_value());
+    CHECK(addr.to_ipv6() == addr);
+
+    CHECK(addr.scope_id() == 0);
+    addr.set_scope_id(1234);
+    CHECK(addr.scope_id() == 1234);
+}
+
+TEST_CASE("ip address ipv6 multi-cast") {
+    CHECK_NOTHROW(std::ignore = ip_address("FF02::1"));
+
+    ip_address addr(0xFF02, 0, 0, 0, 0, 0, 0, 1);
+    CHECK(addr == ip_address("FF02::1"));
+
+    CHECK(!addr.is_ipv4());
+    CHECK(!addr.is_ipv4_loopback());
+    CHECK(!addr.is_ipv4_any());
+    CHECK(!addr.is_ipv4_broadcast());
+    CHECK(!addr.is_ipv4_private());
+    CHECK(!addr.is_ipv4_linklocal());
+    CHECK(!addr.is_ipv4_multicast());
+
+    CHECK(addr.is_ipv6());
+    CHECK(!addr.is_ipv6_loopback());
+    CHECK(!addr.is_ipv6_any());
+    CHECK(addr.is_ipv6_multicast());
+    CHECK(!addr.is_ipv4_mapped_ipv6());
+
+    CHECK(!addr.to_ipv4().has_value());
+    CHECK(addr.to_ipv6() == addr);
+
+    CHECK(addr.scope_id() == 0);
+    addr.set_scope_id(1234);
+    CHECK(addr.scope_id() == 1234);
+}
+
+TEST_CASE("ip address ipv4-mapped ipv6") {
+    CHECK_NOTHROW(std::ignore = ip_address("::FFFF:7F00:1"));
+
+    ip_address addr(0, 0, 0, 0, 0, 0xFFFF, 0x7F00, 0x0001);
+    CHECK(addr == ip_address("::FFFF:7F00:1"));
+
+    CHECK(!addr.is_ipv4());
+    CHECK(!addr.is_ipv4_loopback());
+    CHECK(!addr.is_ipv4_any());
+    CHECK(!addr.is_ipv4_broadcast());
+    CHECK(!addr.is_ipv4_private());
+    CHECK(!addr.is_ipv4_linklocal());
+    CHECK(!addr.is_ipv4_multicast());
+    CHECK(addr.is_ipv4_mapped_ipv6());
+
+    CHECK(addr.is_ipv6());
+    CHECK(!addr.is_ipv6_loopback());
+    CHECK(!addr.is_ipv6_any());
+    CHECK(!addr.is_ipv6_multicast());
+
+    CHECK(addr.to_ipv4().value() == ip_address(127, 0, 0, 1));
+    CHECK(addr.to_ipv6() == addr);
+
+    CHECK(addr == ip_address(127, 0, 0, 1).to_ipv6());
+}
