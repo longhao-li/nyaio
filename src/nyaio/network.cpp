@@ -12,9 +12,9 @@ nyaio::ip_address::ip_address(std::string_view addr) : m_addr(), m_is_ipv6(false
     sa_family_t family;
 
     auto throw_if_error = [addr](bool condition) -> void {
-        if (!condition)
+        if (condition)
             throw std::invalid_argument(
-                std::string("invalid IP address").append(addr.data(), addr.size()));
+                std::string("invalid IP address ").append(addr.data(), addr.size()));
     };
 
     if (addr.find('.') != std::string_view::npos) {
