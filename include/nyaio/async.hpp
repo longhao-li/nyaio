@@ -1707,7 +1707,7 @@ public:
         sqe->opcode    = IORING_OP_CONNECT;
         sqe->fd        = m_socket;
         sqe->addr      = reinterpret_cast<uintptr_t>(m_addr);
-        sqe->len       = m_addrlen;
+        sqe->off       = m_addrlen;
         sqe->user_data = reinterpret_cast<uintptr_t>(m_promise);
 
         ring.flush_sq();

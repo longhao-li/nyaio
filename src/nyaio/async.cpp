@@ -337,9 +337,6 @@ static auto io_uring_available_flags() noexcept -> uint32_t {
     if (v >= make_version(5, 11, 0))
         flags |= io_uring_setup_sqpoll;
 
-    if (v >= make_version(6, 0, 0))
-        flags |= io_uring_setup_single_issuer;
-
     if (v >= make_version(6, 6, 0))
         flags |= io_uring_setup_no_sqarray;
 

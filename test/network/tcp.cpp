@@ -108,7 +108,7 @@ static auto pingpong_client(uint16_t port, io_context &ctx,
                             std::atomic_int &count) noexcept -> task<> {
     tcp_stream s;
 
-    std::errc error = s.connect({ipv4_loopback, port});
+    std::errc error = co_await s.connect_async({ipv4_loopback, port});
     CHECK(error == std::errc{});
 
     uint8_t peer[1024];
