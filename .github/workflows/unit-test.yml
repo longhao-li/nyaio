@@ -1,0 +1,80 @@
+name: Unit Test
+
+on:
+  push:
+    branches: [ "*" ]
+  pull_request:
+    branches: [ "*" ]
+
+jobs:
+  gcc-debug:
+    runs-on: ubuntu-24.04
+    name: Unit Test (GCC-Debug)
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+        repository: "longhao-li/nyaio"
+        ref: "main"
+
+    - name: configure
+      run: mkdir build-gcc-debug && cd build-gcc-debug && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Debug ..
+    - name: build
+      run: cd build-gcc-debug && make -j4
+    - name: test
+      run: cd build-gcc-debug && ctest
+
+  gcc-debug-shared:
+    runs-on: ubuntu-24.04
+    name: Unit Test (GCC-Debug-Shared)
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+        repository: "longhao-li/nyaio"
+        ref: "main"
+
+    - name: configure
+      run: mkdir build-gcc-debug-shared && cd build-gcc-debug-shared && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Debug ..
+    - name: build
+      run: cd build-gcc-debug-shared && make -j4
+    - name: test
+      run: cd build-gcc-debug-shared && ctest
+
+  gcc-release:
+    runs-on: ubuntu-24.04
+    name: Unit Test (GCC-Release)
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+        repository: "longhao-li/nyaio"
+        ref: "main"
+
+    - name: configure
+      run: mkdir build-gcc-release && cd build-gcc-release && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release ..
+    - name: build
+      run: cd build-gcc-release && make -j4
+    - name: test
+      run: cd build-gcc-release && ctest
+
+  gcc-release-shared:
+    runs-on: ubuntu-24.04
+    name: Unit Test (GCC-Release-Shared)
+
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+        repository: "longhao-li/nyaio"
+        ref: "main"
+    
+    - name: configure
+      run: mkdir build-gcc-release-shared && cd build-gcc-release-shared && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release ..
+    - name: build
+      run: cd build-gcc-release-shared && make -j4
+    - name: test
+      run: cd build-gcc-release-shared && ctest
