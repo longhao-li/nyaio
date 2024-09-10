@@ -10,6 +10,7 @@ endif()
 option(NYAIO_BUILD_SHARED_LIBS  "Build nyaio as shared library. The CMake BUILD_SHARED_LIBS option does not affect this project." OFF)
 option(NYAIO_WARNINGS_AS_ERRORS "Treat warnings as errors when building nyaio." OFF)
 option(NYAIO_BUILD_TESTS        "Build tests for nyaio." OFF)
+option(NYAIO_BUILD_EXAMPLES     "Build examples for nyaio." OFF)
 option(NYAIO_ENABLE_LTO         "Enable link-time optimization for shared library. Ignored for static library." OFF)
 
 file(GLOB_RECURSE NYAIO_HEADER_FILES "include/nyaio/*.hpp")
@@ -146,4 +147,9 @@ if(NYAIO_BUILD_TESTS)
     enable_testing()
     include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
     doctest_discover_tests(nyaio-test)
+endif()
+
+# Build examples.
+if(NYAIO_BUILD_EXAMPLES)
+    add_subdirectory(example)
 endif()
