@@ -151,7 +151,7 @@ auto asyncFileIo(IoContext &ctx) noexcept -> Task<> {
 
         char buffer[content.size()];
 
-        error = co_await file.truncateAsync(1);
+        error = file.truncate(1);
         CHECK(error == std::errc{});
         CHECK(file.size() == 1);
 

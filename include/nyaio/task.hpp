@@ -1473,7 +1473,8 @@ public:
             sqe = worker->pollSubmissionQueueEntry();
         }
 
-        sqe->opcode    = IORING_OP_FTRUNCATE;
+        // IORING_OP_FTRUNCATE. Some old kernel headers may not have this definition.
+        sqe->opcode    = 55;
         sqe->fd        = m_file;
         sqe->off       = m_size;
         sqe->user_data = reinterpret_cast<std::uintptr_t>(&promise);

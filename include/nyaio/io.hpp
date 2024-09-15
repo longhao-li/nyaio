@@ -466,22 +466,6 @@ public:
     }
 
     /// @brief
-    ///   Async truncate the file to specified size. This method will suspend current coroutine
-    ///   until the file truncate operation is completed. If currently this file is larger than the
-    ///   specified size, the extra data will be discarded. If currently this file is smaller than
-    ///   the specified size, the file will be extended and the extended part will be filled with
-    ///   zero.
-    /// @param size
-    ///   New size in byte of the file.
-    /// @return
-    ///   An error code that indicates the result of the truncate operation. The error code is
-    ///   @c std::errc{} if succeeded to truncate the file.
-    [[nodiscard]]
-    auto truncateAsync(std::size_t size) noexcept -> FileTruncateAwaitable {
-        return {m_file, size};
-    }
-
-    /// @brief
     ///   Seek the file pointer to specified position.
     /// @param base
     ///   Base position for seeking.
