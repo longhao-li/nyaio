@@ -10,7 +10,8 @@ Checks: '
   cppcoreguidelines-explicit-virtual-functions,
   performance-*,
   -performance-no-int-to-ptr,
-  -performance-noexcept-move-constructor
+  -performance-noexcept-move-constructor,
+  -performance-enum-size
 '
 WarningsAsErrors: '
   clang-diagnostic-*,

@@ -6,8 +6,501 @@
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/stat.h>
 
 namespace nyaio {
+
+/// @enum FileFlag
+/// @brief
+///   Flags for opening file.
+enum class FileFlag : std::uint16_t {
+    None     = 0,
+    Read     = (1 << 0),
+    Write    = (1 << 1),
+    Append   = (1 << 2),
+    Create   = (1 << 3),
+    Direct   = (1 << 4),
+    Truncate = (1 << 5),
+    Sync     = (1 << 6),
+};
+
+constexpr auto operator~(FileFlag flag) noexcept -> FileFlag {
+    return static_cast<FileFlag>(~static_cast<std::uint16_t>(flag));
+}
+
+constexpr auto operator&(FileFlag lhs, FileFlag rhs) noexcept -> FileFlag {
+    return static_cast<FileFlag>(static_cast<std::uint16_t>(lhs) & static_cast<std::uint16_t>(rhs));
+}
+
+constexpr auto operator|(FileFlag lhs, FileFlag rhs) noexcept -> FileFlag {
+    return static_cast<FileFlag>(static_cast<std::uint16_t>(lhs) | static_cast<std::uint16_t>(rhs));
+}
+
+constexpr auto operator^(FileFlag lhs, FileFlag rhs) noexcept -> FileFlag {
+    return static_cast<FileFlag>(static_cast<std::uint16_t>(lhs) ^ static_cast<std::uint16_t>(rhs));
+}
+
+constexpr auto operator&=(FileFlag &lhs, FileFlag rhs) noexcept -> FileFlag & {
+    lhs = lhs & rhs;
+    return lhs;
+}
+
+constexpr auto operator|=(FileFlag &lhs, FileFlag rhs) noexcept -> FileFlag & {
+    lhs = lhs | rhs;
+    return lhs;
+}
+
+constexpr auto operator^=(FileFlag &lhs, FileFlag rhs) noexcept -> FileFlag & {
+    lhs = lhs ^ rhs;
+    return lhs;
+}
+
+/// @enum FileMode
+/// @brief
+///   File mode for creating file.
+enum class FileMode : std::uint16_t {
+    None          = 0,
+    OwnerRead     = (1 << 8),
+    OwnerWrite    = (1 << 7),
+    OwnerExecute  = (1 << 6),
+    OwnerAll      = OwnerRead | OwnerWrite | OwnerExecute,
+    GroupRead     = (1 << 5),
+    GroupWrite    = (1 << 4),
+    GroupExecute  = (1 << 3),
+    GroupAll      = GroupRead | GroupWrite | GroupExecute,
+    OthersRead    = (1 << 2),
+    OthersWrite   = (1 << 1),
+    OthersExecute = (1 << 0),
+    OthersAll     = OthersRead | OthersWrite | OthersExecute,
+};
+
+constexpr auto operator~(FileMode mode) noexcept -> FileMode {
+    return static_cast<FileMode>(~static_cast<std::uint16_t>(mode));
+}
+
+constexpr auto operator&(FileMode lhs, FileMode rhs) noexcept -> FileMode {
+    return static_cast<FileMode>(static_cast<std::uint16_t>(lhs) & static_cast<std::uint16_t>(rhs));
+}
+
+constexpr auto operator|(FileMode lhs, FileMode rhs) noexcept -> FileMode {
+    return static_cast<FileMode>(static_cast<std::uint16_t>(lhs) | static_cast<std::uint16_t>(rhs));
+}
+
+constexpr auto operator^(FileMode lhs, FileMode rhs) noexcept -> FileMode {
+    return static_cast<FileMode>(static_cast<std::uint16_t>(lhs) ^ static_cast<std::uint16_t>(rhs));
+}
+
+constexpr auto operator&=(FileMode &lhs, FileMode rhs) noexcept -> FileMode & {
+    lhs = lhs & rhs;
+    return lhs;
+}
+
+constexpr auto operator|=(FileMode &lhs, FileMode rhs) noexcept -> FileMode & {
+    lhs = lhs | rhs;
+    return lhs;
+}
+
+constexpr auto operator^=(FileMode &lhs, FileMode rhs) noexcept -> FileMode & {
+    lhs = lhs ^ rhs;
+    return lhs;
+}
+
+/// @enum SeekBase
+/// @brief
+///   Base position for seeking file.
+enum class SeekBase : std::uint8_t {
+    Begin   = SEEK_SET,
+    Current = SEEK_CUR,
+    End     = SEEK_END,
+};
+
+/// @class File
+/// @brief
+///   Wrapper class for generic regular file.
+class File {
+public:
+    using Self = File;
+
+    /// @brief
+    ///   Create an empty file object. Empty file object cannot be used for any file operation.
+    File() noexcept : m_file(-1), m_flags(), m_path() {}
+
+    /// @brief
+    ///   @c File is not copyable.
+    File(const Self &other) = delete;
+
+    /// @brief
+    ///   Move constructor of @c File.
+    /// @param[in, out] other
+    ///   The @c File object to be moved from. The moved object will be empty after this operation.
+    File(Self &&other) noexcept
+        : m_file(other.m_file), m_flags(other.m_flags), m_path(std::move(other.m_path)) {
+        other.m_file  = -1;
+        other.m_flags = FileFlag::None;
+        other.m_path.clear();
+    }
+
+    /// @brief
+    ///   Close the file and destroy this object.
+    ~File() {
+        if (m_file != -1)
+            ::close(m_file);
+    }
+
+    /// @brief
+    ///   @c File is not copyable.
+    auto operator=(const Self &other) = delete;
+
+    /// @brief
+    ///   Move assignment operator of @c File.
+    /// @param[in, out] other
+    ///   The @c File object to be moved from. The moved object will be empty after this operation.
+    /// @return
+    ///   Reference to this @c File object.
+    auto operator=(Self &&other) noexcept -> Self & {
+        if (this == &other) [[unlikely]]
+            return *this;
+
+        if (m_file != -1)
+            ::close(m_file);
+
+        m_file  = other.m_file;
+        m_flags = other.m_flags;
+        m_path  = std::move(other.m_path);
+
+        other.m_file  = -1;
+        other.m_flags = FileFlag::None;
+        other.m_path.clear();
+
+        return *this;
+    }
+
+    /// @brief
+    ///   Checks if this file is opened.
+    /// @retval true
+    ///   This file is opened.
+    /// @retval false
+    ///   This file is not opened.
+    [[nodiscard]]
+    auto isOpened() const noexcept -> bool {
+        return m_file != -1;
+    }
+
+    /// @brief
+    ///   Checks if this file is closed.
+    /// @retval true
+    ///   This file is closed.
+    /// @retval false
+    ///   This file is not closed.
+    [[nodiscard]]
+    auto isClosed() const noexcept -> bool {
+        return m_file == -1;
+    }
+
+    /// @brief
+    ///   Checks if reading is allowed on this file.
+    /// @retval true
+    ///   Reading is allowed on this file.
+    /// @retval false
+    ///   Reading is not allowed on this file.
+    [[nodiscard]]
+    auto canRead() const noexcept -> bool {
+        return (m_flags & FileFlag::Read) != FileFlag::None;
+    }
+
+    /// @brief
+    ///   Checks if writing is allowed on this file.
+    /// @retval true
+    ///   Writing is allowed on this file.
+    /// @retval false
+    ///   Writing is not allowed on this file.
+    [[nodiscard]]
+    auto canWrite() const noexcept -> bool {
+        return (m_flags & FileFlag::Write) != FileFlag::None;
+    }
+
+    /// @brief
+    ///   Get open flags of this file. It is undefined behavior to get flags from empty file object.
+    /// @return
+    ///   Open flags of this file.
+    [[nodiscard]]
+    auto flags() const noexcept -> FileFlag {
+        return m_flags;
+    }
+
+    /// @brief
+    ///   Get path of this file. It is undefined behavior to get path from empty file object.
+    /// @return
+    ///   Path of this file.
+    [[nodiscard]]
+    auto path() const noexcept -> std::string_view {
+        return m_path;
+    }
+
+    /// @brief
+    ///   Get size of this file. It is undefined behavior to get size from empty file object.
+    /// @return
+    ///   Size in byte of this file.
+    [[nodiscard]]
+    auto size() const noexcept -> std::size_t {
+        struct stat st;
+        if (::fstat(m_file, &st) == -1) [[unlikely]]
+            return 0;
+        return st.st_size;
+    }
+
+    /// @brief
+    ///   Try to open a file with specified flags. File mode will be set to 0644 by default if
+    ///   @c FileFlag::Create is specified and the file does not exist.
+    /// @param path
+    ///   Path to the file to be opened.
+    /// @param flags
+    ///   Flags for opening the file.
+    /// @return
+    ///   An error code that indicates the result of the open operation. The error code is
+    ///   @c std::errc{} if succeeded to open the file.
+    auto open(std::string_view path, FileFlag flags) noexcept -> std::errc {
+        return open(path, flags,
+                    FileMode::OwnerRead | FileMode::OwnerWrite | FileMode::GroupRead |
+                        FileMode::OthersRead);
+    }
+
+    /// @brief
+    ///   Try to open a file with specified flags.
+    /// @param path
+    ///   Path to the file to be opened.
+    /// @param flags
+    ///   Flags for opening the file.
+    /// @param mode
+    ///   Mode of the new file if a new file is created. This parameter will be ignored if
+    ///   @c FileFlag::Create is not specified.
+    /// @return
+    ///   An error code that indicates the result of the open operation. The error code is
+    ///   @c std::errc{} if succeeded to open the file.
+    NYAIO_API auto open(std::string_view path, FileFlag flags, FileMode mode) noexcept -> std::errc;
+
+    /// @brief
+    ///   Close the file. It is safe to close an empty file object.
+    auto close() noexcept -> void {
+        if (m_file != -1) {
+            ::close(m_file);
+            m_file  = -1;
+            m_flags = FileFlag::None;
+            m_path.clear();
+        }
+    }
+
+    /// @brief
+    ///   Read some data from this file.
+    /// @param[out] buffer
+    ///   Pointer to the buffer to store the read data.
+    /// @param size
+    ///   Size in byte of the buffer.
+    /// @return
+    ///   A struct that contains number of bytes read and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes read is valid.
+    auto read(void *buffer, std::uint32_t size) noexcept -> SystemIoResult {
+        int result = ::read(m_file, buffer, size);
+        if (result < 0) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Read some data from this file at specified offset.
+    /// @param[out] buffer
+    ///   Pointer to the buffer to store the read data.
+    /// @param size
+    ///   Size in byte of the buffer.
+    /// @param offset
+    ///   Offset in byte from the beginning of the file to start reading.
+    /// @return
+    ///   A struct that contains number of bytes read and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes read is valid. The returned number of
+    ///   bytes is 0 if end of file is reached.
+    auto read(void *buffer, std::uint32_t size, std::size_t offset) noexcept -> SystemIoResult {
+        int result = ::pread(m_file, buffer, size, offset);
+        if (result < 0) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async read some data from this file. This method will suspend current coroutine until the
+    ///   reading operation is completed or any error occurs.
+    /// @param[out] buffer
+    ///   Pointer to the buffer to store the read data.
+    /// @param size
+    ///   Size in byte of the buffer.
+    /// @return
+    ///   A struct that contains number of bytes read and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes read is valid. The returned number of
+    ///   bytes is 0 if end of file is reached.
+    [[nodiscard]]
+    auto readAsync(void *buffer, std::uint32_t size) noexcept -> ReadAwaitable {
+        return {m_file, buffer, size, std::uint64_t(-1)};
+    }
+
+    /// @brief
+    ///   Async read some data from this file at specified offset. This method will suspend current
+    ///   coroutine until the reading operation is completed or any error occurs.
+    /// @param[out] buffer
+    ///   Pointer to the buffer to store the read data.
+    /// @param size
+    ///   Size in byte of the buffer.
+    /// @param offset
+    ///   Offset in byte from the beginning of the file to start reading.
+    /// @return
+    ///   A struct that contains number of bytes read and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes read is valid. The returned number of
+    ///   bytes is 0 if end of file is reached.
+    [[nodiscard]]
+    auto readAsync(void *buffer, std::uint32_t size, std::size_t offset) noexcept -> ReadAwaitable {
+        return {m_file, buffer, size, offset};
+    }
+
+    /// @brief
+    ///   Write some data to this file.
+    /// @param data
+    ///   Pointer to start of the data to be written.
+    /// @param size
+    ///   Expected size in byte of data to be written.
+    /// @return
+    ///   A struct that contains number of bytes written and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes written is valid.
+    auto write(const void *data, std::uint32_t size) noexcept -> SystemIoResult {
+        int result = ::write(m_file, data, size);
+        if (result < 0) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Write some data to this file at specified offset.
+    /// @param data
+    ///   Pointer to start of the data to be written.
+    /// @param size
+    ///   Expected size in byte of data to be written.
+    /// @param offset
+    ///   Offset in byte from the beginning of the file to start writing.
+    /// @return
+    ///   A struct that contains number of bytes written and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes written is valid.
+    auto write(const void *data, std::uint32_t size, std::size_t offset) noexcept
+        -> SystemIoResult {
+        int result = ::pwrite(m_file, data, size, offset);
+        if (result < 0) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async write some data to this file. This method will suspend current coroutine until the
+    ///   writing operation is completed or any error occurs.
+    /// @param data
+    ///   Pointer to start of the data to be written.
+    /// @param size
+    ///   Expected size in byte of data to be written.
+    /// @return
+    ///   A struct that contains number of bytes written and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes written is valid.
+    [[nodiscard]]
+    auto writeAsync(const void *data, std::uint32_t size) noexcept -> WriteAwaitable {
+        return {m_file, data, size, std::uint64_t(-1)};
+    }
+
+    /// @brief
+    ///   Async write some data to this file at specified offset. This method will suspend current
+    ///   coroutine until the writing operation is completed or any error occurs.
+    /// @param data
+    ///   Pointer to start of the data to be written.
+    /// @param size
+    ///   Expected size in byte of data to be written.
+    /// @param offset
+    ///   Offset in byte from the beginning of the file to start writing.
+    /// @return
+    ///   A struct that contains number of bytes written and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes written is valid.
+    [[nodiscard]]
+    auto writeAsync(const void *data, std::uint32_t size, std::size_t offset) noexcept
+        -> WriteAwaitable {
+        return {m_file, data, size, offset};
+    }
+
+    /// @brief
+    ///   Flush the file to disk. This method will block current thread until the file is flushed.
+    /// @return
+    ///   An error code that indicates the result of the flush operation. The error code is
+    ///   @c std::errc{} if succeeded to flush the file.
+    auto flush() noexcept -> std::errc {
+        if (::fsync(m_file) == -1) [[unlikely]]
+            return std::errc{errno};
+        return std::errc{};
+    }
+
+    /// @brief
+    ///   Async flush the file to disk. This method will suspend current coroutine until the flush
+    ///   operation is completed.
+    /// @return
+    ///   An error code that indicates the result of the flush operation. The error code is
+    ///   @c std::errc{} if succeeded to flush the file.
+    [[nodiscard]]
+    auto flushAsync() noexcept -> FileSyncAwaitable {
+        return {m_file};
+    }
+
+    /// @brief
+    ///   Truncate the file to specified size. This method will block current thread until the file
+    ///   truncate operation is completed. If currently this file is larger than the specified size,
+    ///   the extra data will be discarded. If currently this file is smaller than the specified
+    ///   size, the file will be extended and the extended part will be filled with zero.
+    /// @param size
+    ///   New size in byte of the file.
+    /// @return
+    ///   An error code that indicates the result of the truncate operation. The error code is
+    ///   @c std::errc{} if succeeded to truncate the file.
+    auto truncate(std::size_t size) noexcept -> std::errc {
+        if (::ftruncate(m_file, size) == -1) [[unlikely]]
+            return std::errc{errno};
+        return std::errc{};
+    }
+
+    /// @brief
+    ///   Async truncate the file to specified size. This method will suspend current coroutine
+    ///   until the file truncate operation is completed. If currently this file is larger than the
+    ///   specified size, the extra data will be discarded. If currently this file is smaller than
+    ///   the specified size, the file will be extended and the extended part will be filled with
+    ///   zero.
+    /// @param size
+    ///   New size in byte of the file.
+    /// @return
+    ///   An error code that indicates the result of the truncate operation. The error code is
+    ///   @c std::errc{} if succeeded to truncate the file.
+    [[nodiscard]]
+    auto truncateAsync(std::size_t size) noexcept -> FileTruncateAwaitable {
+        return {m_file, size};
+    }
+
+    /// @brief
+    ///   Seek the file pointer to specified position.
+    /// @param base
+    ///   Base position for seeking.
+    /// @param offset
+    ///   Offset in byte from the base position to seek.
+    /// @return
+    ///   An error code that indicates the result of the seek operation. The error code is
+    ///   @c std::errc{} if succeeded to seek the file.
+    auto seek(SeekBase base, std::ptrdiff_t offset) noexcept -> std::errc {
+        if (::lseek(m_file, offset, static_cast<int>(base)) == -1) [[unlikely]]
+            return std::errc{errno};
+        return std::errc{};
+    }
+
+private:
+    int m_file;
+    FileFlag m_flags;
+    std::string m_path;
+};
 
 /// @brief
 ///   Convert a multi-byte integer from host endian to network endian.
@@ -885,7 +1378,7 @@ public:
     /// @return
     ///   A struct that contains number of bytes received and an error code. The error code is
     ///   @c std::errc{} if succeeded and the number of bytes received is valid.
-    auto receive(void *buffer, std::uint32_t size) noexcept -> SystemIoResult {
+    auto receive(void *buffer, std::uint32_t size) const noexcept -> SystemIoResult {
         ssize_t result = ::recv(m_socket, buffer, size, 0);
         if (result == -1) [[unlikely]]
             return {0, std::errc{-errno}};
@@ -903,7 +1396,7 @@ public:
     ///   A struct that contains number of bytes received and an error code. The error code is
     ///   @c std::errc{} if succeeded and the number of bytes received is valid.
     [[nodiscard]]
-    auto receiveAsync(void *buffer, std::uint32_t size) noexcept -> ReceiveAwaitable {
+    auto receiveAsync(void *buffer, std::uint32_t size) const noexcept -> ReceiveAwaitable {
         return {m_socket, buffer, size, 0};
     }
 
@@ -1188,7 +1681,7 @@ public:
     /// @return
     ///   A struct of accepted TCP stream and error code. The error code is 0 if succeeded to accept
     ///   a new connection.
-    NYAIO_API auto accept() noexcept -> AcceptResult;
+    NYAIO_API auto accept() const noexcept -> AcceptResult;
 
     /// @brief
     ///   Async accept a new incoming TCP connection. This method will suspend this coroutine until
@@ -1197,7 +1690,7 @@ public:
     ///   A struct of accepted TCP stream and error code. The error code is 0 if succeeded to accept
     ///   a new connection.
     [[nodiscard]]
-    auto acceptAsync() noexcept -> AcceptAwaiter {
+    auto acceptAsync() const noexcept -> AcceptAwaiter {
         return {m_socket};
     }
 

@@ -1274,7 +1274,6 @@ public:
     /// @return
     ///   A struct that contains number of bytes read and an error code. The error code is
     ///   @c std::errc{} if succeeded and the number of bytes read is valid.
-    [[nodiscard]]
     auto await_resume() const noexcept -> SystemIoResult {
         if (m_promise->ioResult < 0) [[unlikely]]
             return {0, std::errc{-m_promise->ioResult}};
@@ -1354,7 +1353,6 @@ public:
     /// @return
     ///   A struct that contains number of bytes written and an error code. The error code is
     ///   @c std::errc{} if succeeded and the number of bytes written is valid.
-    [[nodiscard]]
     auto await_resume() const noexcept -> SystemIoResult {
         if (m_promise->ioResult < 0) [[unlikely]]
             return {0, std::errc{-m_promise->ioResult}};
@@ -1367,6 +1365,135 @@ private:
     std::uint32_t m_size;
     const void *m_data;
     std::uint64_t m_offset;
+};
+
+/// @class FileSyncAwaitable
+/// @brief
+///   Awaitable object for file synchronization operation.
+class FileSyncAwaitable {
+public:
+    using Self = FileSyncAwaitable;
+
+    /// @brief
+    ///   Create a new @c FileSyncAwaitable for file synchronization operation.
+    /// @param file
+    ///   File descriptor to be synchronized.
+    FileSyncAwaitable(int file) noexcept : m_promise(), m_file(file) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for file synchronize operation and suspend the coroutine.
+    /// @tparam T
+    ///   Type of promise of current coroutine.
+    /// @param coro
+    ///   Current coroutine handle.
+    template <class T>
+        requires(std::is_base_of_v<detail::PromiseBase, T>)
+    auto await_suspend(std::coroutine_handle<T> coro) noexcept -> void {
+        auto &promise = static_cast<detail::PromiseBase &>(coro.promise());
+        m_promise     = &promise;
+        auto *worker  = promise.worker;
+
+        io_uring_sqe *sqe = worker->pollSubmissionQueueEntry();
+        while (sqe == nullptr) [[unlikely]] {
+            worker->submit();
+            sqe = worker->pollSubmissionQueueEntry();
+        }
+
+        sqe->opcode    = IORING_OP_FSYNC;
+        sqe->fd        = m_file;
+        sqe->user_data = reinterpret_cast<std::uintptr_t>(&promise);
+
+        worker->flushSubmissionQueue();
+    }
+
+    /// @brief
+    ///   Resume this coroutine and get result of the file synchronize operation.
+    /// @return
+    ///   A system error code that indicates the result of the file synchronize operation. The error
+    ///   code is @c std::errc{} if succeeded.
+    auto await_resume() const noexcept -> std::errc {
+        return std::errc{-m_promise->ioResult};
+    }
+
+private:
+    detail::PromiseBase *m_promise;
+    int m_file;
+};
+
+/// @class FileTruncateAwaitable
+/// @brief
+///   Awaitable object for file truncate operation.
+class FileTruncateAwaitable {
+public:
+    using Self = FileTruncateAwaitable;
+
+    /// @brief
+    ///   Create a new @c FileTruncateAwaitable for file truncate operation.
+    /// @param file
+    ///   File descriptor to the file be truncated.
+    /// @param size
+    ///   New size in byte of the file.
+    FileTruncateAwaitable(int file, std::size_t size) noexcept
+        : m_promise(), m_file(file), m_size(size) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for file truncate operation and suspend the coroutine.
+    /// @tparam T
+    ///   Type of promise of current coroutine.
+    /// @param coro
+    ///   Current coroutine handle.
+    template <class T>
+        requires(std::is_base_of_v<detail::PromiseBase, T>)
+    auto await_suspend(std::coroutine_handle<T> coro) noexcept -> void {
+        auto &promise = static_cast<detail::PromiseBase &>(coro.promise());
+        m_promise     = &promise;
+        auto *worker  = promise.worker;
+
+        io_uring_sqe *sqe = worker->pollSubmissionQueueEntry();
+        while (sqe == nullptr) [[unlikely]] {
+            worker->submit();
+            sqe = worker->pollSubmissionQueueEntry();
+        }
+
+        sqe->opcode    = IORING_OP_FTRUNCATE;
+        sqe->fd        = m_file;
+        sqe->off       = m_size;
+        sqe->user_data = reinterpret_cast<std::uintptr_t>(&promise);
+
+        worker->flushSubmissionQueue();
+    }
+
+    /// @brief
+    ///   Resume this coroutine and get result of the file truncate operation.
+    /// @return
+    ///   A system error code that indicates the result of the file truncate operation. The error
+    ///   code is @c std::errc{} if succeeded.
+    auto await_resume() const noexcept -> std::errc {
+        return std::errc{-m_promise->ioResult};
+    }
+
+private:
+    detail::PromiseBase *m_promise;
+    int m_file;
+    std::size_t m_size;
 };
 
 /// @class SendAwaitable

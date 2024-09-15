@@ -86,7 +86,7 @@ auto pingPongClient(IoContext &ctx, const InetAddress &address, std::atomic_int 
 
 } // namespace
 
-TEST_CASE("[io/tcp] TCP stream ping-pong") {
+TEST_CASE("[tcp] TCP stream ping-pong") {
     IoContext ctx(1);
 
     std::atomic_int completedServers{0};
@@ -100,7 +100,7 @@ TEST_CASE("[io/tcp] TCP stream ping-pong") {
     ctx.run();
 }
 
-TEST_CASE("[io/tcp] TCP blocked IO") {
+TEST_CASE("[tcp] TCP blocked IO") {
     std::atomic_bool serverReady{false};
     InetAddress address(IpAddress("127.0.0.1"), 23457);
 
@@ -139,4 +139,18 @@ TEST_CASE("[io/tcp] TCP blocked IO") {
 
     serverThread.join();
     clientThread.join();
+}
+
+TEST_CASE("[tcp] TCP client connect to bad address") {
+    InetAddress badAddr;
+    TcpStream client;
+    std::errc error = client.connect(badAddr);
+    CHECK(error != std::errc{});
+}
+
+TEST_CASE("[tcp] TCP server listen to bad address") {
+    InetAddress badAddr;
+    TcpServer server;
+    std::errc error = server.bind(badAddr);
+    CHECK(error != std::errc{});
 }

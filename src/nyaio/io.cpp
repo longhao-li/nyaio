@@ -1,9 +1,58 @@
 #include "nyaio/io.hpp"
 
-#include <arpa/inet.h>
 #include <stdexcept>
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+
 using namespace nyaio;
+
+auto File::open(std::string_view path, FileFlag flags, FileMode mode) noexcept -> std::errc {
+    std::string temp(path);
+    int openFlags = O_CLOEXEC;
+
+    if ((flags & FileFlag::Read) != FileFlag::None) {
+        if ((flags & FileFlag::Write) != FileFlag::None) {
+            openFlags |= O_RDWR;
+        } else {
+            flags      = FileFlag::Read;
+            openFlags |= O_RDONLY;
+        }
+    }
+
+    if ((flags & FileFlag::Write) != FileFlag::None) {
+        if ((flags & FileFlag::Read) == FileFlag::None)
+            openFlags |= O_WRONLY;
+
+        if ((flags & FileFlag::Append) != FileFlag::None)
+            openFlags |= O_APPEND;
+
+        if ((flags & FileFlag::Create) != FileFlag::None)
+            openFlags |= O_CREAT;
+
+        if ((flags & FileFlag::Truncate) != FileFlag::None)
+            openFlags |= O_TRUNC;
+    }
+
+    if ((flags & FileFlag::Direct) != FileFlag::None)
+        openFlags |= O_DIRECT;
+
+    if ((flags & FileFlag::Sync) != FileFlag::None)
+        openFlags |= O_SYNC;
+
+    int file = ::open(temp.c_str(), openFlags, static_cast<mode_t>(mode));
+    if (file == -1)
+        return std::errc{errno};
+
+    if (m_file != -1)
+        ::close(m_file);
+
+    m_file  = file;
+    m_flags = flags;
+    m_path  = std::move(temp);
+
+    return {};
+}
 
 IpAddress::IpAddress(std::string_view addr) : m_isV6(), m_addr() {
     char buffer[INET6_ADDRSTRLEN];
@@ -83,7 +132,7 @@ auto TcpServer::bind(const InetAddress &address) noexcept -> std::errc {
     return {};
 }
 
-auto TcpServer::accept() noexcept -> AcceptResult {
+auto TcpServer::accept() const noexcept -> AcceptResult {
     InetAddress address;
     socklen_t length = sizeof(address);
 

@@ -7,7 +7,7 @@
 
 using namespace nyaio;
 
-TEST_CASE("[io/ip] IpAddress IPv4 loopback") {
+TEST_CASE("[ip] IpAddress IPv4 loopback") {
     CHECK_NOTHROW(std::ignore = IpAddress("127.0.0.1"));
     CHECK_THROWS_AS(std::ignore = IpAddress(""), std::invalid_argument &);
     CHECK_THROWS_AS(std::ignore = IpAddress("256.123.12.345"), std::invalid_argument &);
@@ -33,7 +33,7 @@ TEST_CASE("[io/ip] IpAddress IPv4 loopback") {
     CHECK(addr.toIpv4() == addr);
 }
 
-TEST_CASE("[io/ip] IpAddress IPv4 broadcast") {
+TEST_CASE("[ip] IpAddress IPv4 broadcast") {
     CHECK_NOTHROW(std::ignore = IpAddress("255.255.255.255"));
 
     IpAddress addr(255, 255, 255, 255);
@@ -57,7 +57,7 @@ TEST_CASE("[io/ip] IpAddress IPv4 broadcast") {
     CHECK(addr.toIpv4() == addr);
 }
 
-TEST_CASE("[io/ip] IpAddress IPv4 any") {
+TEST_CASE("[ip] IpAddress IPv4 any") {
     CHECK_NOTHROW(std::ignore = IpAddress("0.0.0.0"));
 
     IpAddress addr(0, 0, 0, 0);
@@ -81,7 +81,7 @@ TEST_CASE("[io/ip] IpAddress IPv4 any") {
     CHECK(addr.toIpv4() == addr);
 }
 
-TEST_CASE("[io/ip] IpAddress IPv4 private") {
+TEST_CASE("[ip] IpAddress IPv4 private") {
     // some class A private network
     CHECK_NOTHROW(std::ignore = IpAddress("10.0.3.1"));
     // some class B private network
@@ -147,7 +147,7 @@ TEST_CASE("[io/ip] IpAddress IPv4 private") {
     CHECK(c.toIpv4() == c);
 }
 
-TEST_CASE("[io/ip] IpAddress IPv4 link-local") {
+TEST_CASE("[ip] IpAddress IPv4 link-local") {
     CHECK_NOTHROW(std::ignore = IpAddress("169.254.1.23"));
 
     IpAddress addr(169, 254, 1, 23);
@@ -170,7 +170,7 @@ TEST_CASE("[io/ip] IpAddress IPv4 link-local") {
     CHECK(addr.toIpv4() == addr);
 }
 
-TEST_CASE("[io/ip] IpAddress IPv4 multicast") {
+TEST_CASE("[ip] IpAddress IPv4 multicast") {
     CHECK_NOTHROW(std::ignore = IpAddress("224.1.2.3"));
 
     IpAddress addr(224, 1, 2, 3);
@@ -193,7 +193,7 @@ TEST_CASE("[io/ip] IpAddress IPv4 multicast") {
     CHECK(addr.toIpv4() == addr);
 }
 
-TEST_CASE("[io/ip] IpAddress IPv6 loopback") {
+TEST_CASE("[ip] IpAddress IPv6 loopback") {
     CHECK_NOTHROW(std::ignore = IpAddress("::1"));
     CHECK_THROWS_AS(std::ignore = IpAddress(":::"), std::invalid_argument &);
     CHECK_THROWS_AS(std::ignore = IpAddress("FFFF0::"), std::invalid_argument &);
@@ -219,7 +219,7 @@ TEST_CASE("[io/ip] IpAddress IPv6 loopback") {
     CHECK(addr.toIpv6() == addr);
 }
 
-TEST_CASE("[io/ip] IpAddress IPv6 any") {
+TEST_CASE("[ip] IpAddress IPv6 any") {
     CHECK_NOTHROW(std::ignore = IpAddress("::"));
 
     IpAddress addr(0, 0, 0, 0, 0, 0, 0, 0);
