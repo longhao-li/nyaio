@@ -12,6 +12,8 @@ TEST_CASE("[file] File IO") {
         std::errc error = file.open("nyaio-test-file.txt",
                                     FileFlag::Write | FileFlag::Create | FileFlag::Truncate);
         CHECK(error == std::errc{});
+        CHECK(file.isOpened());
+        CHECK(!file.isClosed());
         CHECK(!file.canRead());
         CHECK(file.canWrite());
         CHECK(file.flags() == (FileFlag::Write | FileFlag::Create | FileFlag::Truncate));
@@ -33,6 +35,8 @@ TEST_CASE("[file] File IO") {
         std::errc error = file.open("nyaio-test-file.txt", FileFlag::Read);
         CHECK(error == std::errc{});
 
+        CHECK(file.isOpened());
+        CHECK(!file.isClosed());
         CHECK(file.canRead());
         CHECK(!file.canWrite());
         CHECK(file.flags() == FileFlag::Read);
@@ -68,6 +72,9 @@ TEST_CASE("[file] File IO") {
         File file;
         std::errc error =
             file.open("nyaio-test-file.txt", FileFlag::Read | FileFlag::Write | FileFlag::Sync);
+
+        CHECK(file.isOpened());
+        CHECK(!file.isClosed());
 
         char buffer[content.size()];
 

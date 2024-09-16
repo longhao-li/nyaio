@@ -44,6 +44,7 @@ auto pingPongListener(IoContext &ctx, const InetAddress &address, std::atomic_in
 
     std::errc error = server.bind(address);
     CHECK(error == std::errc{});
+    CHECK(server.address() == address);
 
     for (std::size_t i = 0; i < NumPingPongConnections; ++i) {
         auto [stream, error] = co_await server.acceptAsync();
@@ -57,6 +58,13 @@ auto pingPongClient(IoContext &ctx, const InetAddress &address, std::atomic_int 
                     std::atomic_int &completedClients) noexcept -> Task<> {
     TcpStream client;
     std::errc error = co_await client.connectAsync(address);
+    CHECK(error == std::errc{});
+    CHECK(client.remoteAddress() == address);
+
+    error = client.setKeepAlive(true);
+    CHECK(error == std::errc{});
+
+    error = client.setNoDelay(true);
     CHECK(error == std::errc{});
 
     char buffer[PingPongBufferSize]{};
@@ -76,6 +84,8 @@ auto pingPongClient(IoContext &ctx, const InetAddress &address, std::atomic_int 
             totalReceiveSize += receiveSize;
         }
     }
+
+    client.close();
 
     int clientCompleteCount  = completedClients.fetch_add(1, std::memory_order_relaxed);
     clientCompleteCount     += 1;

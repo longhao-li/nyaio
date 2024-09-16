@@ -82,7 +82,7 @@ auto TcpStream::connect(const InetAddress &address) noexcept -> std::errc {
     auto *addr = reinterpret_cast<const struct sockaddr *>(&address);
     int s      = ::socket(addr->sa_family, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
     if (s == -1) [[unlikely]]
-        return static_cast<std::errc>(errno);
+        return std::errc{errno};
 
     if (::connect(s, addr, address.size()) == -1) [[unlikely]] {
         int error = errno;
@@ -142,4 +142,46 @@ auto TcpServer::accept() const noexcept -> AcceptResult {
         return {TcpStream{}, std::errc{errno}};
 
     return {TcpStream{s, address}, std::errc{}};
+}
+
+auto UdpSocket::bind(const InetAddress &address) noexcept -> std::errc {
+    auto *addr = reinterpret_cast<const sockaddr *>(&address);
+
+    // Create the socket if necessary.
+    if (m_socket == -1) {
+        m_socket = ::socket(addr->sa_family, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+        if (m_socket == -1) [[unlikely]]
+            return std::errc{errno};
+
+        const int value = 1;
+        ::setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value));
+        ::setsockopt(m_socket, SOL_SOCKET, SO_REUSEPORT, &value, sizeof(value));
+    }
+
+    if (::bind(m_socket, addr, address.size()) == -1) [[unlikely]]
+        return std::errc{errno};
+
+    m_localAddress = address;
+    return {};
+}
+
+auto UdpSocket::connect(const InetAddress &address) noexcept -> std::errc {
+    auto *addr = reinterpret_cast<const sockaddr *>(&address);
+
+    // Create the socket if necessary.
+    if (m_socket == -1) {
+        m_socket = ::socket(addr->sa_family, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+        if (m_socket == -1) [[unlikely]]
+            return std::errc{errno};
+
+        const int value = 1;
+        ::setsockopt(m_socket, SOL_SOCKET, SO_REUSEADDR, &value, sizeof(value));
+        ::setsockopt(m_socket, SOL_SOCKET, SO_REUSEPORT, &value, sizeof(value));
+    }
+
+    if (::connect(m_socket, addr, address.size()) == -1) [[unlikely]]
+        return std::errc{errno};
+
+    m_remoteAddress = address;
+    return {};
 }

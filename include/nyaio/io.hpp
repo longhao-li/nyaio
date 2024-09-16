@@ -1207,7 +1207,7 @@ public:
             if (m_promise->ioResult < 0) [[unlikely]] {
                 if (m_socket != -1)
                     ::close(m_socket);
-                return static_cast<std::errc>(-m_promise->ioResult);
+                return std::errc{-m_promise->ioResult};
             }
 
             if (m_stream->m_socket != -1)
@@ -1333,7 +1333,7 @@ public:
     auto send(const void *data, std::uint32_t size) const noexcept -> SystemIoResult {
         ssize_t result = ::send(m_socket, data, size, MSG_NOSIGNAL);
         if (result == -1) [[unlikely]]
-            return {0, std::errc{-errno}};
+            return {0, std::errc{errno}};
         return {static_cast<std::uint32_t>(result), std::errc{}};
     }
 
@@ -1365,7 +1365,7 @@ public:
     auto receive(void *buffer, std::uint32_t size) const noexcept -> SystemIoResult {
         ssize_t result = ::recv(m_socket, buffer, size, 0);
         if (result == -1) [[unlikely]]
-            return {0, std::errc{-errno}};
+            return {0, std::errc{errno}};
         return {static_cast<std::uint32_t>(result), std::errc{}};
     }
 
@@ -1692,6 +1692,462 @@ public:
 private:
     int m_socket;
     InetAddress m_address;
+};
+
+/// @class UdpSocket
+/// @brief
+///   Wrapper class for UDP socket IO.
+class UdpSocket {
+public:
+    using Self = UdpSocket;
+
+    /// @class ConnectAwaiter
+    /// @brief
+    ///   Customized connect awaitable for @c UdpSocket. UDP is not a connection-oriented protocol,
+    ///   but operation system provides a mechanism to allow UDP socket send to and receive from a
+    ///   specific peer address. This class is used to set the peer address for a UDP socket.
+    class ConnectAwaiter {
+    public:
+        using Self = ConnectAwaiter;
+
+        /// @brief
+        ///   Create a new @c ConnectAwaiter for setting peer address of the specified UDP socket.
+        /// @param[in, out] udp
+        ///   The @c UdpSocket to set peer address.
+        /// @param address
+        ///   The peer address to set.
+        ConnectAwaiter(UdpSocket &udp, const InetAddress &address) noexcept
+            : m_promise(nullptr), m_address(&address), m_udp(&udp) {}
+
+        /// @brief
+        ///   C++20 coroutine API method. Always execute @c await_suspend().
+        /// @return
+        ///   This function always returns @c false.
+        [[nodiscard]]
+        static constexpr auto await_ready() noexcept -> bool {
+            return false;
+        }
+
+        /// @brief
+        ///   Prepare for async connect operation and suspend the coroutine.
+        /// @tparam T
+        ///   Type of promise of current coroutine.
+        /// @param coro
+        ///   Current coroutine handle.
+        template <class T>
+            requires(std::is_base_of_v<detail::PromiseBase, T>)
+        auto await_suspend(std::coroutine_handle<T> coro) noexcept -> bool {
+            auto &promise = static_cast<detail::PromiseBase &>(coro.promise());
+            m_promise     = &promise;
+
+            // Create a new socket if necessary.
+            auto *addr = reinterpret_cast<const struct sockaddr *>(m_address);
+            if (m_udp->m_socket == -1) {
+                m_udp->m_socket = ::socket(addr->sa_family, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
+                if (m_udp->m_socket == -1) [[unlikely]] {
+                    promise.ioResult = -errno;
+                    return false;
+                }
+            }
+
+            auto *worker      = promise.worker;
+            io_uring_sqe *sqe = worker->pollSubmissionQueueEntry();
+            while (sqe == nullptr) [[unlikely]] {
+                worker->submit();
+                sqe = worker->pollSubmissionQueueEntry();
+            }
+
+            sqe->opcode    = IORING_OP_CONNECT;
+            sqe->fd        = m_udp->m_socket;
+            sqe->addr      = reinterpret_cast<std::uintptr_t>(m_address);
+            sqe->off       = m_address->size();
+            sqe->user_data = reinterpret_cast<std::uintptr_t>(&promise);
+
+            worker->flushSubmissionQueue();
+            return true;
+        }
+
+        /// @brief
+        ///   Resume this coroutine and get result of the async connect operation.
+        /// @return
+        ///   Error code of the connect operation. The error code is 0 if succeeded.
+        auto await_resume() const noexcept -> std::errc {
+            if (m_promise->ioResult < 0) [[unlikely]]
+                return std::errc{-m_promise->ioResult};
+            m_udp->m_remoteAddress = *m_address;
+            return {};
+        }
+
+    private:
+        detail::PromiseBase *m_promise;
+        const InetAddress *m_address;
+        UdpSocket *m_udp;
+    };
+
+public:
+    /// @brief
+    ///   Create an empty @c UdpSocket. Empty @c UdpSocket object cannot be used for IO operations.
+    UdpSocket() noexcept : m_socket(-1), m_localAddress(), m_remoteAddress() {}
+
+    /// @brief
+    ///   @c UdpSocket is not copyable.
+    UdpSocket(const Self &other) = delete;
+
+    /// @brief
+    ///   Move constructor of @c UdpSocket.
+    /// @param[in, out] other
+    ///   The @c UdpSocket object to be moved from. The moved object will be empty and can not be
+    ///   used for IO operations.
+    UdpSocket(Self &&other) noexcept
+        : m_socket(other.m_socket), m_localAddress(other.m_localAddress),
+          m_remoteAddress(other.m_remoteAddress) {
+        other.m_socket = -1;
+    }
+
+    /// @brief
+    ///   Close the UDP socket and destroy this object.
+    ~UdpSocket() {
+        if (m_socket != -1)
+            ::close(m_socket);
+    }
+
+    /// @brief
+    ///   @c UdpSocket is not copyable.
+    auto operator=(const Self &other) = delete;
+
+    /// @brief
+    ///   Move assignment of @c UdpSocket.
+    /// @param[in, out] other
+    ///   The @c UdpSocket object to be moved from. The moved object will be empty and can not be
+    ///   used for IO operations.
+    /// @return
+    ///   Reference to this @c UdpSocket.
+    auto operator=(Self &&other) noexcept -> Self & {
+        if (this == &other) [[unlikely]]
+            return *this;
+
+        if (m_socket != -1)
+            ::close(m_socket);
+
+        m_socket        = other.m_socket;
+        m_localAddress  = other.m_localAddress;
+        m_remoteAddress = other.m_remoteAddress;
+
+        other.m_socket        = -1;
+        other.m_localAddress  = {};
+        other.m_remoteAddress = {};
+
+        return *this;
+    }
+
+    /// @brief
+    ///   Get local address of this UDP socket. It is undefined behavior to get local address from
+    ///   an an @c UdpSocket that is not bound to any address.
+    /// @return
+    ///   Local address of this UDP socket.
+    [[nodiscard]]
+    auto localAddress() const noexcept -> const InetAddress & {
+        return m_localAddress;
+    }
+
+    /// @brief
+    ///   Get remote address of this UDP socket. It is undefined behavior to get remote address from
+    ///   an @c UdpSocket that is not connected to any peer address.
+    /// @return
+    ///   Remote address of this UDP socket.
+    [[nodiscard]]
+    auto remoteAddress() const noexcept -> const InetAddress & {
+        return m_remoteAddress;
+    }
+
+    /// @brief
+    ///   Bind this UDP socket to the specified local address. This method will create a new UDP
+    ///   socket and bind to the specified address.
+    /// @note
+    ///   This method behaves differently from @c TcpServer::bind. This method does not close the
+    ///   original UDP socket and will try to bind the original socket to the new address if this is
+    ///   not an empty UDP socket.
+    /// @param address
+    ///   The local address to bind for this UDP socket.
+    /// @return
+    ///   A system error code that indicates whether succeeded to bind this UDP socket to the
+    ///   specified address. The error code is 0 if succeeded to bind this UDP socket.
+    NYAIO_API auto bind(const InetAddress &address) noexcept -> std::errc;
+
+    /// @brief
+    ///   UDP socket does not have a connection state. This method is used to set the peer address
+    ///   of this UDP socket. This method will block current thread until the peer address is set or
+    ///   any error occurs.
+    /// @note
+    ///   This method behaves differently from @c TcpStream::connect. This method does not close the
+    ///   original UDP socket and will try to set the peer address of the original socket to the new
+    ///   address if this is not an empty UDP socket.
+    /// @param address
+    ///   The peer address to set for this UDP socket.
+    /// @return
+    ///   A system error code that indicates whether succeeded to set the peer address for this UDP
+    ///   socket. The error code is 0 if succeeded to set the peer address.
+    NYAIO_API auto connect(const InetAddress &address) noexcept -> std::errc;
+
+    /// @brief
+    ///   UDP socket does not have a connection state. This method is used to set the peer address
+    ///   of this UDP socket. This method will suspend this coroutine until the peer address is set
+    ///   or any error occurs.
+    /// @note
+    ///   This method behaves differently from @c TcpStream::connect. This method does not close the
+    ///   original UDP socket and will try to set the peer address of the original socket to the new
+    ///   address if this is not an empty UDP socket.
+    /// @param address
+    ///   The peer address to set for this UDP socket.
+    /// @return
+    ///   A system error code that indicates whether succeeded to set the peer address for this UDP
+    ///   socket. The error code is 0 if succeeded to set the peer address.
+    [[nodiscard]]
+    auto connectAsync(const InetAddress &address) noexcept -> ConnectAwaiter {
+        return {*this, address};
+    }
+
+    /// @brief
+    ///   Send a message to the peer address of this UDP socket. This method will block current
+    ///   thread until the message is sent or any error occurs.
+    /// @note
+    ///   UDP protocol does not guarantee that the message will be received by the peer endpoint.
+    ///   This method will return successfully if the message is sent to the kernel buffer.
+    /// @param peer
+    ///   The peer address to send the message.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent. The maximum size of data to be sent is 65507.
+    /// @return
+    ///   A struct that contains number of bytes sent and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes sent is valid.
+    auto sendTo(const InetAddress &peer, const void *data, std::uint32_t size) const noexcept
+        -> SystemIoResult {
+        ssize_t result = ::sendto(m_socket, data, size, MSG_NOSIGNAL,
+                                  reinterpret_cast<const struct sockaddr *>(&peer), peer.size());
+        if (result == -1) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async send a message to the peer address of this UDP socket. This method will suspend this
+    ///   coroutine until the message is sent or any error occurs.
+    /// @note
+    ///   UDP protocol does not guarantee that the message will be received by the peer endpoint.
+    ///   This method will return successfully if the message is sent to the kernel buffer.
+    /// @param peer
+    ///   The peer address to send the message.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent. The maximum size of data to be sent is 65507.
+    /// @return
+    ///   A struct that contains number of bytes sent and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes sent is valid.
+    auto sendToAsync(const InetAddress &peer, const void *data, std::uint32_t size) const noexcept
+        -> SendToAwaitable {
+        return {
+            m_socket,    data, size, MSG_NOSIGNAL, reinterpret_cast<const struct sockaddr *>(&peer),
+            peer.size(),
+        };
+    }
+
+    /// @brief
+    ///   Receive a message from the peer address of this UDP socket. This method will block current
+    ///   thread until the message is received or any error occurs.
+    /// @param[out] peer
+    ///   The peer address that sends the message.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received. The maximum size of data to be received is 65507.
+    /// @return
+    ///   A struct that contains number of bytes received and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes received is valid.
+    auto receiveFrom(InetAddress &peer, void *buffer, std::uint32_t size) const noexcept
+        -> SystemIoResult {
+        socklen_t length = sizeof(peer);
+        ssize_t result   = ::recvfrom(m_socket, buffer, size, 0,
+                                      reinterpret_cast<struct sockaddr *>(&peer), &length);
+        if (result == -1) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async receive a message from the peer address of this UDP socket. This method will suspend
+    ///   this coroutine until the message is received or any error occurs.
+    /// @param[out] peer
+    ///   The peer address that sends the message.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received. The maximum size of data to be received is 65507.
+    /// @return
+    ///   A struct that contains number of bytes received and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes received is valid.
+    [[nodiscard]]
+    auto receiveFromAsync(InetAddress &peer, void *buffer, std::uint32_t size) const noexcept
+        -> ReceiveFromAwaitable {
+        return {
+            m_socket, buffer, size, 0, reinterpret_cast<struct sockaddr *>(&peer), sizeof(peer),
+        };
+    }
+
+    /// @brief
+    ///   Send a message to the peer address of this UDP socket. This method will block current
+    ///   thread until the message is sent or any error occurs. This method could be used only if
+    ///   the peer address is set by @c UdpSocket::connect or @c UdpSocket::connectAsync.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent. The maximum size of data to be sent is 65507.
+    /// @return
+    ///   A struct that contains number of bytes sent and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes sent is valid.
+    auto send(const void *data, std::uint32_t size) const noexcept -> SystemIoResult {
+        ssize_t result = ::send(m_socket, data, size, MSG_NOSIGNAL);
+        if (result == -1) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async send a message to the peer address of this UDP socket. This method will suspend this
+    ///   coroutine until the message is sent or any error occurs. This method could be used only if
+    ///   the peer address is set by @c UdpSocket::connect or @c UdpSocket::connectAsync.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent. The maximum size of data to be sent is 65507.
+    /// @return
+    ///   A struct that contains number of bytes sent and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes sent is valid.
+    [[nodiscard]]
+    auto sendAsync(const void *data, std::uint32_t size) const noexcept -> SendAwaitable {
+        return {m_socket, data, size, MSG_NOSIGNAL};
+    }
+
+    /// @brief
+    ///   Receive a message from the peer address of this UDP socket. This method will block current
+    ///   thread until the message is received or any error occurs. This method could be used only
+    ///   if the peer address is set by @c UdpSocket::connect or @c UdpSocket::connectAsync.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received. The maximum size of data to be received is 65507.
+    /// @return
+    ///   A struct that contains number of bytes received and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes received is valid.
+    auto receive(void *buffer, std::uint32_t size) const noexcept -> SystemIoResult {
+        ssize_t result = ::recv(m_socket, buffer, size, 0);
+        if (result == -1) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async receive a message from the peer address of this UDP socket. This method will suspend
+    ///   this coroutine until the message is received or any error occurs. This method could be
+    ///   used only if the peer address is set by @c UdpSocket::connect or @c
+    ///   UdpSocket::connectAsync.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received. The maximum size of data to be received is 65507.
+    /// @return
+    ///   A struct that contains number of bytes received and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes received is valid.
+    [[nodiscard]]
+    auto receiveAsync(void *buffer, std::uint32_t size) const noexcept -> ReceiveAwaitable {
+        return {m_socket, buffer, size, 0};
+    }
+
+    /// @brief
+    ///   Set timeout event for send and send to operation. @c UdpSocket::sendTo and
+    ///   @c UdpSocket::send may generate an error that indicates the timeout event if timeout
+    ///   event occurs. The TCP connection may be in an undefined state and should be closed if send
+    ///   timeout event occurs.
+    /// @tparam Rep
+    ///   Type representation of duration type. See @c std::chrono::duration for details.
+    /// @tparam Period
+    ///   Ratio type that is used to measure how to do conversion between different duration types.
+    ///   See @c std::chrono::duration for details.
+    /// @param duration
+    ///   Timeout duration of send operation. Ratios less than microseconds are not allowed.
+    /// @return
+    ///   An error code that indicates whether succeeded to set the timeout event. The error code is
+    ///   0 if succeeded to set or remove send timeout event for this TCP connection.
+    template <class Rep, class Period>
+        requires(std::ratio_less_equal_v<std::micro, Period>)
+    auto setSendTimeout(std::chrono::duration<Rep, Period> duration) noexcept -> std::errc {
+        auto microsec = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        if (microsec < 0) [[unlikely]]
+            return std::errc::invalid_argument;
+
+        const struct timeval timeout{
+            .tv_sec  = static_cast<std::uint32_t>(microsec / 1000000),
+            .tv_usec = static_cast<std::uint32_t>(microsec % 1000000),
+        };
+
+        int ret = ::setsockopt(m_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+        if (ret == -1) [[unlikely]]
+            return std::errc{errno};
+
+        return {};
+    }
+
+    /// @brief
+    ///   Set timeout event for receive operation. @c UdpSocket::receiveFrom and
+    ///   @c UdpSocket::receive may generate an error that indicates the timeout event if timeout
+    ///   event occurs. The TCP connection may be in an undefined state and should be closed if
+    ///   receive timeout event occurs.
+    /// @tparam Rep
+    ///   Type representation of duration type. See @c std::chrono::duration for details.
+    /// @tparam Period
+    ///   Ratio type that is used to measure how to do conversion between different duration types.
+    ///   See @c std::chrono::duration for details.
+    /// @param duration
+    ///   Timeout duration of receive operation. Ratios less than microseconds are not allowed.
+    /// @return
+    ///   An error code that indicates whether succeeded to set the timeout event. The error code is
+    ///   0 if succeeded to set or remove receive timeout event for this TCP connection.
+    template <class Rep, class Period>
+        requires(std::ratio_less_equal_v<std::micro, Period>)
+    auto setReceiveTimeout(std::chrono::duration<Rep, Period> duration) noexcept -> std::errc {
+        auto microsec = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        if (microsec < 0) [[unlikely]]
+            return std::errc::invalid_argument;
+
+        const struct timeval timeout{
+            .tv_sec  = static_cast<std::uint32_t>(microsec / 1000000),
+            .tv_usec = static_cast<std::uint32_t>(microsec % 1000000),
+        };
+
+        int ret = ::setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        if (ret == -1) [[unlikely]]
+            return std::errc{errno};
+
+        return {};
+    }
+
+    /// @brief
+    ///   Close this UDP socket and release all resources. Closing a UDP socket with pending IO
+    ///   requirements may cause errors for the IO results. This method does nothing if current UDP
+    ///   socket is empty.
+    auto close() noexcept -> void {
+        if (m_socket != -1) {
+            ::close(m_socket);
+            m_socket = -1;
+        }
+    }
+
+private:
+    int m_socket;
+    InetAddress m_localAddress;
+    InetAddress m_remoteAddress;
 };
 
 } // namespace nyaio
