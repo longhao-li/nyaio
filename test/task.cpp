@@ -165,6 +165,39 @@ TEST_CASE("[task] ScheduleAwaitable") {
 
 namespace {
 
+auto waitAllTask0() noexcept -> Task<int> {
+    co_await TimeoutAwaitable(100ms);
+    co_return 1;
+}
+
+auto waitAllTask1() noexcept -> Task<std::string> {
+    co_return "Hello, world!";
+}
+
+auto waitAllTask2() noexcept -> Task<std::string> {
+    std::string str  = co_await waitAllTask1();
+    str             += co_await waitAllTask1();
+    co_return str;
+}
+
+auto waitAllAwaitableTask(IoContext &ctx) noexcept -> Task<> {
+    auto awaitable    = waitAll(waitAllTask0(), waitAllTask2());
+    auto [value, str] = co_await awaitable;
+    CHECK(value == 1);
+    CHECK(str == "Hello, world!Hello, world!");
+    ctx.stop();
+}
+
+} // namespace
+
+TEST_CASE("[task] WaitAllAwaitable") {
+    IoContext ctx(1);
+    ctx.schedule(waitAllAwaitableTask(ctx));
+    ctx.run();
+}
+
+namespace {
+
 auto readAwaitableTask(IoContext &ctx) noexcept -> Task<> {
     int zero = ::open("/dev/zero", O_RDONLY);
     CHECK(zero >= 0);

@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <tuple>
 
 #include <linux/io_uring.h>
 #include <sys/socket.h>
@@ -738,6 +739,15 @@ public:
     }
 
     /// @brief
+    ///   Get promise object of this task.
+    /// @return
+    ///   Reference to the promise object of this task.
+    [[nodiscard]]
+    auto promise() noexcept -> promise_type & {
+        return m_coroutine.promise();
+    }
+
+    /// @brief
     ///   C++20 coroutine awaitable API. Suspend the caller coroutine and start this one.
     auto operator co_await() const noexcept -> awaitable_type {
         return awaitable_type(m_coroutine);
@@ -1209,6 +1219,87 @@ private:
 ///   Deduction guide for @c ScheduleAwaitable.
 template <class T>
 ScheduleAwaitable(Task<T>) -> ScheduleAwaitable<T>;
+
+/// @class WaitAllAwaitable
+/// @tparam Ts
+///   Return types of the awaiting tasks. @c void is not allowed.
+/// @brief
+///   Awaitable object for waiting an array of tasks.
+template <class... Ts>
+    requires(sizeof...(Ts) > 0 && !std::disjunction_v<std::is_void<Ts>...>)
+class WaitAllAwaitable {
+public:
+    using Self = WaitAllAwaitable;
+
+    /// @brief
+    ///   Create a new awaitable for waiting an array of tasks.
+    /// @param tasks
+    ///   Tasks to be waited for.
+    WaitAllAwaitable(Task<Ts>... tasks) noexcept : m_tasks(std::make_tuple(std::move(tasks)...)) {}
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for waiting for the given tasks.
+    /// @tparam U
+    ///   Type of promise of current coroutine.
+    /// @param coro
+    ///   Current coroutine handle.
+    template <class U>
+        requires(std::is_base_of_v<detail::PromiseBase, U>)
+    auto await_suspend(std::coroutine_handle<U> coro) noexcept -> void {
+        std::apply(
+            [this, coro](auto &...tasks) {
+                (tasks.operator co_await().await_suspend(coro), ...);
+
+                // Tasks should not be moved, it will be used by await_resume later.
+                (ScheduleAwaitable(tasks).await_suspend(coro), ...);
+
+                // ScheduleAwaitable detached all coroutine handles and therefore the reference
+                // count should be decreased. Maybe use some better way to handle this in the
+                // future.
+                (tasks.promise().release(), ...);
+            },
+            m_tasks);
+    }
+
+    /// @brief
+    ///   Resume this coroutine and get results of the awaited tasks.
+    /// @return
+    ///   A tuple that contains results of the awaited tasks.
+    auto await_resume() const -> std::tuple<Ts...> {
+        return std::apply(
+            [this](auto &...tasks) {
+                return std::make_tuple(tasks.operator co_await().await_resume()...);
+            },
+            m_tasks);
+    }
+
+private:
+    std::tuple<Task<Ts>...> m_tasks;
+};
+
+/// @brief
+///   Suspend current task and wait for all of the given tasks to be completed.
+/// @tparam T
+///   First return type of the tasks to be waited. @c void is not allowed.
+/// @tparam Ts
+///   Return types of the rest of tasks to be waited. @c void is not allowed.
+/// @return
+///   An awaitable object that can be used to wait for all of the given tasks. Return values of the
+///   awaited tasks may be acquired via structured bindings.
+template <class T, class... Ts>
+    requires(!std::disjunction_v<std::is_void<T>, std::is_void<Ts>...>)
+auto waitAll(Task<T> task, Task<Ts>... tasks) noexcept -> WaitAllAwaitable<T, Ts...> {
+    return WaitAllAwaitable<T, Ts...>(std::move(task), std::move(tasks)...);
+}
 
 /// @class ReadAwaitable
 /// @brief
