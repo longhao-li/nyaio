@@ -16,7 +16,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: "longhao-li/nyaio"
-        ref: "main"
+        ref: ${{ github.ref }}
 
     - name: configure
       run: mkdir build-gcc-debug && cd build-gcc-debug && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Debug ..
@@ -34,7 +34,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: "longhao-li/nyaio"
-        ref: "main"
+        ref: ${{ github.ref }}
 
     - name: configure
       run: mkdir build-gcc-debug-shared && cd build-gcc-debug-shared && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Debug ..
@@ -52,7 +52,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: "longhao-li/nyaio"
-        ref: "main"
+        ref: ${{ github.ref }}
 
     - name: configure
       run: mkdir build-gcc-release && cd build-gcc-release && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release ..
@@ -70,7 +70,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: "longhao-li/nyaio"
-        ref: "main"
+        ref: ${{ github.ref }}
     
     - name: configure
       run: mkdir build-gcc-release-shared && cd build-gcc-release-shared && cmake -DCMAKE_CXX_COMPILER=g++ -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=ON -DCMAKE_BUILD_TYPE=Release ..

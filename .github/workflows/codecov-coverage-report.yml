@@ -1,0 +1,32 @@
+name: Upload Codecov Report
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    name: Build, Test and Report Code Coverage Report
+    steps:
+    - name: checkout
+      uses: actions/checkout@v4
+      with:
+        repository: "longhao-li/nyaio"
+        ref: "main"
+    - name: configure
+      run: mkdir build && cd build && cmake -DCMAKE_CXX_COMPILER=g++ -DCMAKE_CXX_FLAGS="-fprofile-arcs -ftest-coverage" -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release ..
+    - name: build
+      run: cd build && make -j2
+    - name: test
+      run: cd build && ./nyaio-test
+    - name: install lcov
+      run: sudo apt-get install -y lcov
+    - name: report coverage
+      run: |
+        lcov --capture --directory . --output-file coverage.info
+        lcov --remove coverage.info '/usr/*' 'test/*' 'build/_deps/*' --output-file coverage.info
+        lcov --list coverage.info
+        bash <(curl -s https://codecov.io/bash) -f coverage.info -t 8d1827e5-b522-4d49-9511-5e74047b5888
