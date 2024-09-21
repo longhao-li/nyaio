@@ -26,7 +26,7 @@ jobs:
       run: sudo apt-get install -y lcov
     - name: report coverage
       run: |
-        lcov --capture --directory . --output-file coverage.info
-        lcov --remove coverage.info '/usr/*' 'test/*' 'build/_deps/*' --output-file coverage.info
+        lcov --ignore-errors usage --capture --directory . --output-file coverage.info --no-external
+        lcov --ignore-errors unused --remove coverage.info 'test/*' --output-file coverage.info 
         lcov --list coverage.info
         bash <(curl -s https://codecov.io/bash) -f coverage.info -t 8d1827e5-b522-4d49-9511-5e74047b5888
