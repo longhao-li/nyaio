@@ -45,10 +45,10 @@ endif()
 # Alias target to be consistent with the package name.
 add_library(nyaio::nyaio ALIAS nyaio)
 
-# This project uses C++20 coroutine.
+# This project uses C++20 coroutine and concept.
 target_compile_features(nyaio PUBLIC cxx_std_20)
 
-# Set options for shared library.
+# Set compiler options.
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(
         nyaio

@@ -1167,6 +1167,23 @@ private:
     __kernel_timespec m_timeout;
 };
 
+/// @brief
+///   Suspend current coroutine for a while.
+/// @tparam Rep
+///   Type representation of duration type. See @c std::chrono::duration for details.
+/// @tparam Period
+///   Ratio type that is used to measure how to do conversion between different duration types. See
+///   @c std::chrono::duration for details.
+/// @param period
+///   Duration to be suspended. Ratios greater than nanoseconds are not allowed.
+/// @return
+///   An awaitable object that can be used to suspend current coroutine for the specified time.
+template <class Rep, class Period>
+    requires(std::ratio_less_equal_v<std::nano, Period>)
+auto sleep(std::chrono::duration<Rep, Period> period) noexcept -> TimeoutAwaitable {
+    return TimeoutAwaitable(period);
+}
+
 /// @class ScheduleAwaitable
 /// @brief
 ///   Awaitable object for scheduling a new task in current worker.
@@ -1219,6 +1236,19 @@ private:
 ///   Deduction guide for @c ScheduleAwaitable.
 template <class T>
 ScheduleAwaitable(Task<T>) -> ScheduleAwaitable<T>;
+
+/// @brief
+///   Schedule a new task in current worker.
+/// @tparam T
+///   Return type of the task to be scheduled.
+/// @param task
+///   The task to be scheduled.
+/// @return
+///   An awaitable object that can be used to schedule the given task.
+template <class T>
+auto schedule(Task<T> task) noexcept -> ScheduleAwaitable<T> {
+    return {std::move(task)};
+}
 
 /// @class WaitAllAwaitable
 /// @tparam Ts

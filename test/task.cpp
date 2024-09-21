@@ -147,7 +147,7 @@ auto scheduleAwaitableTask(IoContext &ctx) noexcept -> Task<> {
     }(tid, childTid);
 
     // The sub-coroutine runs in the same thread as the parent coroutine.
-    co_await ScheduleAwaitable(t);
+    co_await schedule(t);
     while (!t.isCompleted())
         co_await YieldAwaitable();
 
@@ -166,7 +166,7 @@ TEST_CASE("[task] ScheduleAwaitable") {
 namespace {
 
 auto waitAllTask0() noexcept -> Task<int> {
-    co_await TimeoutAwaitable(100ms);
+    co_await sleep(100ms);
     co_return 1;
 }
 
