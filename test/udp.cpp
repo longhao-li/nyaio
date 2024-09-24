@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 using namespace nyaio;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -115,4 +116,19 @@ TEST_CASE("[udp] UDP blocked IO") {
 
     serverThread.join();
     clientThread.join();
+}
+
+TEST_CASE("[udp] UDP socket receive timeout") {
+    InetAddress address(Ipv6Loopback, 23462);
+    UdpSocket udp;
+
+    CHECK(udp.bind(address) == std::errc{});
+    CHECK(udp.setReceiveTimeout(-1s) == std::errc::invalid_argument);
+    CHECK(udp.setReceiveTimeout(100ms) == std::errc{});
+
+    InetAddress peer;
+    std::size_t buffer;
+    auto [bytes, error] = udp.receiveFrom(peer, &buffer, sizeof(buffer));
+    CHECK((error == std::errc::resource_unavailable_try_again ||
+           error == std::errc::operation_would_block));
 }
