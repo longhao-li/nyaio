@@ -4,11 +4,166 @@
 
 #include <bit>
 
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/stat.h>
 
 namespace nyaio {
+
+/// @class Channel
+/// @brief
+///   Channel is used for concurrent-safe asynchronize data transformation.
+class Channel {
+public:
+    using Self = Channel;
+
+    /// @brief
+    ///   Create an empty channel. Empty channel cannot be used to transfer data.
+    Channel() : m_pipe{-1, -1} {}
+
+    /// @brief
+    ///   @c Channel is not copyable.
+    Channel(const Self &other) = delete;
+
+    /// @brief
+    ///   Move constructor of @c Channel.
+    /// @param[in, out] other
+    ///   The @c Channel to be moved. The moved @c Channel cannot be used to transfer data anymore.
+    Channel(Self &&other) noexcept : m_pipe{other.m_pipe[0], other.m_pipe[1]} {
+        other.m_pipe[0] = -1;
+        other.m_pipe[1] = -1;
+    }
+
+    /// @brief
+    ///   Destroy this channel.
+    ~Channel() {
+        if (m_pipe[0] != -1) {
+            ::close(m_pipe[0]);
+            ::close(m_pipe[1]);
+        }
+    }
+
+    /// @brief
+    ///   @c Channel is not copyable.
+    auto operator=(const Self &other) = delete;
+
+    /// @brief
+    ///   Move assignment of @c Channel.
+    /// @param[in, out] other
+    ///   The @c Channel to be moved. The moved @c Channel cannot be used to transfer data anymore.
+    /// @return
+    ///   Reference to this @c Channel.
+    auto operator=(Self &&other) noexcept -> Self & {
+        if (this == &other) [[unlikely]]
+            return *this;
+
+        if (m_pipe[0] != -1) {
+            ::close(m_pipe[0]);
+            ::close(m_pipe[1]);
+        }
+
+        m_pipe[0]       = other.m_pipe[0];
+        m_pipe[1]       = other.m_pipe[1];
+        other.m_pipe[0] = -1;
+        other.m_pipe[1] = -1;
+
+        return *this;
+    }
+
+    /// @brief
+    ///   Try to open this channel.
+    /// @return
+    ///   An error code that indicates result of the open operation. The return value is
+    ///   @c std::errc{} if succeeded to open this channel.
+    auto open() noexcept -> std::errc {
+        // Already opened.
+        if (m_pipe[0] != -1) [[unlikely]]
+            return std::errc{};
+
+        if (::pipe2(m_pipe, O_CLOEXEC) == -1) [[unlikely]]
+            return std::errc{errno};
+
+        return std::errc{};
+    }
+
+    /// @brief
+    ///   Close this channel if opened.
+    auto close() noexcept -> void {
+        if (m_pipe[0] != -1) {
+            ::close(m_pipe[0]);
+            ::close(m_pipe[1]);
+
+            m_pipe[0] = -1;
+            m_pipe[1] = -1;
+        }
+    }
+
+    /// @brief
+    ///   Read some data from this channel.
+    /// @param[out] buffer
+    ///   Pointer to the buffer to store the read data.
+    /// @param size
+    ///   Size in byte of the buffer.
+    /// @return
+    ///   A struct that contains number of bytes read and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes read is valid.
+    auto read(void *buffer, std::uint32_t size) noexcept -> SystemIoResult {
+        int result = ::read(m_pipe[0], buffer, size);
+        if (result == -1) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async read some data from this channel. This method will suspend current coroutine until
+    ///   the reading operation is completed or any error occurs.
+    /// @param[out] buffer
+    ///   Pointer to the buffer to store the read data.
+    /// @param size
+    ///   Size in byte of the buffer.
+    /// @return
+    ///   A struct that contains number of bytes read and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes read is valid.
+    [[nodiscard]]
+    auto readAsync(void *buffer, std::uint32_t size) noexcept -> ReadAwaitable {
+        return {m_pipe[0], buffer, size, std::uint64_t(-1)};
+    }
+
+    /// @brief
+    ///   Write some data to this channel.
+    /// @param data
+    ///   Pointer to start of the data to be written.
+    /// @param size
+    ///   Expected size in byte of data to be written.
+    /// @return
+    ///   A struct that contains number of bytes written and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes written is valid.
+    auto write(const void *data, std::uint32_t size) noexcept -> SystemIoResult {
+        int result = ::write(m_pipe[1], data, size);
+        if (result == -1) [[unlikely]]
+            return {0, std::errc{errno}};
+        return {static_cast<std::uint32_t>(result), std::errc{}};
+    }
+
+    /// @brief
+    ///   Async write some data to this channel. This method will suspend current coroutine until
+    ///   the writing operation is completed or any error occurs.
+    /// @param data
+    ///   Pointer to start of the data to be written.
+    /// @param size
+    ///   Expected size in byte of data to be written.
+    /// @return
+    ///   A struct that contains number of bytes written and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes written is valid.
+    [[nodiscard]]
+    auto writeAsync(const void *data, std::uint32_t size) noexcept -> WriteAwaitable {
+        return {m_pipe[1], data, size, std::uint64_t(-1)};
+    }
+
+private:
+    int m_pipe[2];
+};
 
 /// @enum FileFlag
 /// @brief
@@ -301,7 +456,7 @@ public:
     ///   @c std::errc{} if succeeded and the number of bytes read is valid.
     auto read(void *buffer, std::uint32_t size) noexcept -> SystemIoResult {
         int result = ::read(m_file, buffer, size);
-        if (result < 0) [[unlikely]]
+        if (result == -1) [[unlikely]]
             return {0, std::errc{errno}};
         return {static_cast<std::uint32_t>(result), std::errc{}};
     }
@@ -320,7 +475,7 @@ public:
     ///   bytes is 0 if end of file is reached.
     auto read(void *buffer, std::uint32_t size, std::size_t offset) noexcept -> SystemIoResult {
         int result = ::pread(m_file, buffer, size, offset);
-        if (result < 0) [[unlikely]]
+        if (result == -1) [[unlikely]]
             return {0, std::errc{errno}};
         return {static_cast<std::uint32_t>(result), std::errc{}};
     }
@@ -370,7 +525,7 @@ public:
     ///   @c std::errc{} if succeeded and the number of bytes written is valid.
     auto write(const void *data, std::uint32_t size) noexcept -> SystemIoResult {
         int result = ::write(m_file, data, size);
-        if (result < 0) [[unlikely]]
+        if (result == -1) [[unlikely]]
             return {0, std::errc{errno}};
         return {static_cast<std::uint32_t>(result), std::errc{}};
     }
@@ -389,7 +544,7 @@ public:
     auto write(const void *data, std::uint32_t size, std::size_t offset) noexcept
         -> SystemIoResult {
         int result = ::pwrite(m_file, data, size, offset);
-        if (result < 0) [[unlikely]]
+        if (result == -1) [[unlikely]]
             return {0, std::errc{errno}};
         return {static_cast<std::uint32_t>(result), std::errc{}};
     }
