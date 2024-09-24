@@ -1094,6 +1094,15 @@ public:
     static constexpr auto await_resume() noexcept -> void {}
 };
 
+/// @brief
+///   Yield current coroutine to start executing another coroutine.
+/// @return
+///   An awaitable object that can be used to yield current coroutine.
+[[nodiscard]]
+constexpr auto yield() noexcept -> YieldAwaitable {
+    return {};
+}
+
 /// @class TimeoutAwaitable
 /// @brief
 ///   Awaitable object for timeout event. This awaitable suspends current coroutine for the

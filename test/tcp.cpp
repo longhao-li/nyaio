@@ -3,6 +3,7 @@
 #include <doctest/doctest.h>
 
 using namespace nyaio;
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -163,4 +164,53 @@ TEST_CASE("[tcp] TCP server listen to bad address") {
     TcpServer server;
     std::errc error = server.bind(badAddr);
     CHECK(error != std::errc{});
+}
+
+namespace {
+
+auto tcpStreamReceiveTimeout(IoContext &ctx, const InetAddress &address) noexcept -> Task<> {
+    TcpStream stream;
+
+    std::errc error = co_await stream.connectAsync(address);
+    CHECK(error == std::errc{});
+
+    std::size_t buffer;
+
+    // Set timeout.
+    CHECK(stream.setReceiveTimeout(-1s) == std::errc::invalid_argument);
+    CHECK(stream.setReceiveTimeout(100ms) == std::errc{});
+
+    { // Block IO timeout.
+        auto [bytes, error] = stream.receive(&buffer, sizeof(buffer));
+        CHECK((error == std::errc::resource_unavailable_try_again ||
+               error == std::errc::operation_would_block));
+        CHECK(bytes == 0);
+    }
+}
+
+auto tcpStreamTimeoutServer(IoContext &ctx) -> Task<> {
+    InetAddress address(IpAddress("::1"), 23458);
+    TcpServer server;
+
+    std::errc error = server.bind(address);
+    CHECK(error == std::errc{});
+    auto task = tcpStreamReceiveTimeout(ctx, address);
+    co_await schedule(task);
+
+    auto [stream, err] = co_await server.acceptAsync();
+    CHECK(err == std::errc{});
+
+    // Wait for client complete.
+    while (!task.isCompleted())
+        co_await yield();
+
+    ctx.stop();
+}
+
+} // namespace
+
+TEST_CASE("[tcp] TCP stream receive timeout") {
+    IoContext ctx(1);
+    ctx.schedule(tcpStreamTimeoutServer(ctx));
+    ctx.run();
 }
