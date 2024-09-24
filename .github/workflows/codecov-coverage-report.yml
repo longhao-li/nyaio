@@ -17,7 +17,7 @@ jobs:
         repository: "longhao-li/nyaio"
         ref: "main"
     - name: configure
-      run: mkdir build && cd build && cmake -DCMAKE_CXX_COMPILER=g++ -DCMAKE_CXX_FLAGS="-fprofile-arcs -ftest-coverage" -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release ..
+      run: mkdir build && cd build && cmake -DCMAKE_CXX_COMPILER=g++ -DCMAKE_CXX_FLAGS="-fprofile-arcs -ftest-coverage" -DNYAIO_BUILD_TESTS=ON -DNYAIO_BUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Debug ..
     - name: build
       run: cd build && make -j2
     - name: test
