@@ -226,6 +226,51 @@ TEST_CASE("[task] ReadAwaitable") {
 
 namespace {
 
+auto timedReadAwaitableTask(IoContext &ctx) noexcept -> Task<> {
+    { // Normal read.
+        int zero = ::open("/dev/zero", O_RDONLY);
+        CHECK(zero >= 0);
+
+        constexpr char zeros[1024] = {};
+        char buffer[1024];
+
+        for (std::size_t i = 0; i < std::size(buffer); ++i) {
+            auto [bytes, error] = co_await TimedReadAwaitable(zero, buffer, i, 0, 1s);
+            CHECK(error == std::errc{});
+            CHECK(std::memcmp(buffer, zeros, bytes) == 0);
+        }
+
+        ::close(zero);
+    }
+
+    { // Timeout.
+        int pipes[2];
+        CHECK(::pipe2(pipes, O_CLOEXEC) == 0);
+
+        char buffer[1024];
+        for (std::size_t i = 0; i < 5; ++i) {
+            auto [bytes, error] =
+                co_await TimedReadAwaitable(pipes[0], buffer, sizeof(buffer), 0, 100ms);
+            CHECK(error == std::errc::operation_canceled);
+        }
+
+        ::close(pipes[0]);
+        ::close(pipes[1]);
+    }
+
+    ctx.stop();
+}
+
+} // namespace
+
+TEST_CASE("[task] TimedReadAwaitable") {
+    IoContext ctx(1);
+    ctx.schedule(timedReadAwaitableTask(ctx));
+    ctx.run();
+}
+
+namespace {
+
 auto writeAwaitableTask(IoContext &ctx) noexcept -> Task<> {
     int null = ::open("/dev/null", O_WRONLY);
     CHECK(null >= 0);

@@ -398,15 +398,20 @@ auto IoContextWorker::run() noexcept -> void {
         do {
             auto *p = reinterpret_cast<PromiseBase *>(static_cast<std::uintptr_t>(cqe->user_data));
 
+            // p may be null for linked timeout event.
+            if (p == nullptr) [[unlikely]] {
+                consumeCompletionQueueEntries(1);
+                cqe = pollCompletionQueueEntry();
+                continue;
+            }
+
             p->ioFlags  = cqe->flags;
             p->ioResult = cqe->res;
 
             // It is safe to mark current cqe as consumed.
             consumeCompletionQueueEntries(1);
 
-            if (p->isCancelled()) [[unlikely]] {
-                p->release();
-            } else {
+            if (!p->isCancelled()) [[likely]] {
                 auto &stack = p->stackBottomPromise();
                 p->coroutine().resume();
                 if (stack.coroutine().done())

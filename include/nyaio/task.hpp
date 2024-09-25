@@ -1418,6 +1418,116 @@ private:
     std::uint64_t m_offset;
 };
 
+/// @class TimedReadAwaitable
+/// @brief
+///   Awaitable object for async read operation with timeout support.
+class TimedReadAwaitable {
+public:
+    using Self = TimedReadAwaitable;
+
+    /// @brief
+    ///   Create a new @c TimedReadAwaitable for async read operation with timeout support.
+    /// @param file
+    ///   File descriptor to be read from.
+    /// @param[out] buffer
+    ///   Pointer to start of the buffer to store the read data.
+    /// @param size
+    ///   Expected size in byte of data to be read.
+    /// @param offset
+    ///   Offset in byte of the file to start reading. Pass -1 to read from current file pointer.
+    ///   For file descriptors that do not support random access, this value should be 0.
+    template <class Rep, class Period>
+        requires(std::ratio_less_equal_v<std::nano, Period>)
+    TimedReadAwaitable(int file, void *buffer, std::uint32_t size, std::uint64_t offset,
+                       std::chrono::duration<Rep, Period> timeout) noexcept
+        : m_promise(), m_file(file), m_size(size), m_buffer(buffer), m_offset(offset), m_timeout() {
+        auto nano = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
+        if (nano <= 0)
+            return;
+
+        m_timeout.tv_sec  = static_cast<std::uint64_t>(nano) / 1000000000ULL;
+        m_timeout.tv_nsec = static_cast<std::uint64_t>(nano) % 1000000000ULL;
+    }
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async read operation and suspend the coroutine.
+    /// @tparam T
+    ///   Type of promise of current coroutine.
+    /// @param coro
+    ///   Current coroutine handle.
+    template <class T>
+        requires(std::is_base_of_v<detail::PromiseBase, T>)
+    auto await_suspend(std::coroutine_handle<T> coro) noexcept -> void {
+        auto &promise = static_cast<detail::PromiseBase &>(coro.promise());
+        m_promise     = &promise;
+        auto *worker  = promise.worker;
+
+        // Prepare for reading.
+        io_uring_sqe *sqe = worker->pollSubmissionQueueEntry();
+        while (sqe == nullptr) [[unlikely]] {
+            worker->submit();
+            sqe = worker->pollSubmissionQueueEntry();
+        }
+
+        sqe->opcode    = IORING_OP_READ;
+        sqe->fd        = m_file;
+        sqe->off       = m_offset;
+        sqe->addr      = reinterpret_cast<std::uintptr_t>(m_buffer);
+        sqe->len       = m_size;
+        sqe->user_data = reinterpret_cast<std::uintptr_t>(&promise);
+
+        // Prepare for timeout.
+        if (m_timeout.tv_sec != 0 || m_timeout.tv_nsec != 0) {
+            io_uring_sqe *timeSqe = worker->pollSubmissionQueueEntry();
+            while (timeSqe == nullptr) [[unlikely]] {
+                worker->submit();
+                timeSqe = worker->pollSubmissionQueueEntry();
+            }
+
+            sqe->flags = IOSQE_IO_LINK;
+
+            // Prepare timeout event.
+            timeSqe->opcode        = IORING_OP_LINK_TIMEOUT;
+            timeSqe->fd            = -1;
+            timeSqe->addr          = reinterpret_cast<std::uintptr_t>(&m_timeout);
+            timeSqe->len           = 1;
+            timeSqe->user_data     = 0;
+            timeSqe->timeout_flags = 0;
+        }
+
+        worker->flushSubmissionQueue();
+    }
+
+    /// @brief
+    ///   Resume this coroutine and get result of the async read operation.
+    /// @return
+    ///   A struct that contains number of bytes read and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes read is valid. The return value is
+    ///   @c std::errc::operation_canceled if timeout occured.
+    auto await_resume() const noexcept -> SystemIoResult {
+        if (m_promise->ioResult < 0) [[unlikely]]
+            return {0, std::errc{-m_promise->ioResult}};
+        return {static_cast<std::uint32_t>(m_promise->ioResult), std::errc{}};
+    }
+
+private:
+    detail::PromiseBase *m_promise;
+    int m_file;
+    std::uint32_t m_size;
+    void *m_buffer;
+    std::uint64_t m_offset;
+    __kernel_timespec m_timeout;
+};
+
 /// @class WriteAwaitable
 /// @brief
 ///   Awaitable object for async write operation.
