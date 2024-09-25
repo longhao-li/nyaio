@@ -237,6 +237,7 @@ auto timedReadAwaitableTask(IoContext &ctx) noexcept -> Task<> {
         for (std::size_t i = 0; i < std::size(buffer); ++i) {
             auto [bytes, error] = co_await TimedReadAwaitable(zero, buffer, i, 0, 1s);
             CHECK(error == std::errc{});
+            CHECK(bytes == i);
             CHECK(std::memcmp(buffer, zeros, bytes) == 0);
         }
 
@@ -292,6 +293,35 @@ auto writeAwaitableTask(IoContext &ctx) noexcept -> Task<> {
 TEST_CASE("[task] WriteAwaitable") {
     IoContext ctx(1);
     ctx.schedule(writeAwaitableTask(ctx));
+    ctx.run();
+}
+
+namespace {
+
+auto timedWriteAwaitableTask(IoContext &ctx) noexcept -> Task<> {
+    { // Normal write.
+        int null = ::open("/dev/null", O_WRONLY);
+        CHECK(null >= 0);
+
+        constexpr char zeros[1024] = {};
+
+        for (std::size_t i = 0; i < std::size(zeros); ++i) {
+            auto [bytes, error] = co_await TimedWriteAwaitable(null, zeros, i, 0, 1s);
+            CHECK(error == std::errc{});
+            CHECK(bytes == i);
+        }
+
+        ::close(null);
+    }
+
+    ctx.stop();
+}
+
+} // namespace
+
+TEST_CASE("[task] TimedWriteAwaitable") {
+    IoContext ctx(1);
+    ctx.schedule(timedWriteAwaitableTask(ctx));
     ctx.run();
 }
 
