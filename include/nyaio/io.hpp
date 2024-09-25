@@ -1508,6 +1508,28 @@ public:
     }
 
     /// @brief
+    ///   Async send data to peer TCP endpoint. This method will suspend this coroutine until any
+    ///   data is sent or timeout occurs.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent.
+    /// @param timeout
+    ///   Timeout for this send operation. Negative values and zero will be considered as never
+    ///   timeout.
+    /// @return
+    ///   A struct that contains number of bytes sent and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes sent is valid. The return value is
+    ///   @c std::errc::operation_canceled if timeout occured.
+    template <class Rep, class Period>
+        requires(std::ratio_less_equal_v<std::nano, Period>)
+    auto sendAsync(const void *data, std::uint32_t size,
+                   std::chrono::duration<Rep, Period> timeout) const noexcept
+        -> TimedSendAwaitable {
+        return {m_socket, data, size, MSG_NOSIGNAL, timeout};
+    }
+
+    /// @brief
     ///   Receive data from peer TCP endpoint. This method will block current thread until any data
     ///   is received or error occurs.
     /// @param[out] buffer
@@ -1537,6 +1559,28 @@ public:
     [[nodiscard]]
     auto receiveAsync(void *buffer, std::uint32_t size) const noexcept -> ReceiveAwaitable {
         return {m_socket, buffer, size, 0};
+    }
+
+    /// @brief
+    ///   Async receive data from peer TCP endpoint. This method will suspend this coroutine until
+    ///   any data is received or timeout occurs.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store the received data.
+    /// @param size
+    ///   Maximum available size to be received.
+    /// @param timeout
+    ///   Timeout for this receive operation. Negative values and zero will be considered as never
+    ///   timeout.
+    /// @return
+    ///   A struct that contains number of bytes received and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes received is valid. The return value is
+    ///   @c std::errc::operation_canceled if timeout occured.
+    template <class Rep, class Period>
+        requires(std::ratio_less_equal_v<std::nano, Period>)
+    auto receiveAsync(void *buffer, std::uint32_t size,
+                      std::chrono::duration<Rep, Period> timeout) const noexcept
+        -> TimedReceiveAwaitable {
+        return {m_socket, buffer, size, 0, timeout};
     }
 
     /// @brief
@@ -1573,6 +1617,9 @@ public:
     ///   Set timeout event for send operation. @c TcpStream::send and @c TcpStream::sendAsync may
     ///   generate an error that indicates the timeout event if timeout event occurs. The TCP
     ///   connection may be in an undefined state and should be closed if send timeout event occurs.
+    /// @note
+    ///   This method does not affect async IO operations. Use async IO API with timeout support
+    ///   instead.
     /// @tparam Rep
     ///   Type representation of duration type. See @c std::chrono::duration for details.
     /// @tparam Period
@@ -1607,6 +1654,9 @@ public:
     ///   TcpStream::receiveAsync may generate an error that indicates the timeout event if timeout
     ///   event occurs. The TCP connection may be in an undefined state and should be closed if
     ///   receive timeout event occurs.
+    /// @note
+    ///   This method does not affect async IO operations. Use async IO API with timeout support
+    ///   instead.
     /// @tparam Rep
     ///   Type representation of duration type. See @c std::chrono::duration for details.
     /// @tparam Period

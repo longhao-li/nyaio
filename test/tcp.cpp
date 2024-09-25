@@ -186,6 +186,11 @@ auto tcpStreamReceiveTimeout(IoContext &ctx, const InetAddress &address) noexcep
                error == std::errc::operation_would_block));
         CHECK(bytes == 0);
     }
+
+    { // Nonblock IO timeout.
+        auto [bytes, error] = co_await stream.receiveAsync(&buffer, sizeof(buffer), 500ms);
+        CHECK(error == std::errc::operation_canceled);
+    }
 }
 
 auto tcpStreamTimeoutServer(IoContext &ctx) -> Task<> {
