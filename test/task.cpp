@@ -408,6 +408,88 @@ TEST_CASE("[task] Send/ReceiveAwaitable") {
 
 namespace {
 
+auto timedSendAwaitableTask(IoContext &ctx, const char *address,
+                            std::atomic_bool &couldConnect) noexcept -> Task<> {
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, address, std::size(addr.sun_path));
+
+    while (!couldConnect.load(std::memory_order_relaxed))
+        co_await YieldAwaitable();
+
+    int s = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(s >= 0);
+
+    std::errc e =
+        co_await ConnectAwaitable(s, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr));
+    CHECK(e == std::errc{});
+
+    for (std::size_t i = 0; i < 1024; ++i) {
+        auto [bytes, error] = co_await TimedSendAwaitable(s, &i, sizeof(i), MSG_NOSIGNAL, 1s);
+        CHECK(error == std::errc{});
+        CHECK(bytes == sizeof(i));
+    }
+
+    co_await sleep(1s);
+    ::close(s);
+
+    ctx.stop();
+}
+
+auto timedRecvAwaitableTask(const char *address, std::atomic_bool &couldConnect) noexcept
+    -> Task<> {
+    struct sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, address, std::size(addr.sun_path));
+
+    int s = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(s >= 0);
+
+    int ret = ::bind(s, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr));
+    CHECK(ret >= 0);
+
+    ret = ::listen(s, 1);
+    CHECK(ret >= 0);
+
+    couldConnect.store(true, std::memory_order_relaxed);
+
+    auto [client, e] = co_await AcceptAwaitable(s, nullptr, nullptr, SOCK_CLOEXEC);
+    CHECK(e == std::errc{});
+    CHECK(client >= 0);
+
+    for (std::size_t i = 0; i < 1024; ++i) {
+        std::size_t buffer;
+        auto [bytes, error] =
+            co_await TimedReceiveAwaitable(client, &buffer, sizeof(buffer), 0, 1s);
+        CHECK(error == std::errc{});
+        CHECK(bytes == sizeof(buffer));
+        CHECK(buffer == i);
+    }
+
+    std::size_t buffer;
+    auto [bytes, error] = co_await TimedReceiveAwaitable(client, &buffer, sizeof(buffer), 0, 100ms);
+    CHECK(error == std::errc::operation_canceled);
+
+    ::close(client);
+    ::close(s);
+}
+
+} // namespace
+
+TEST_CASE("[task] Timed Send/ReceiveAwaitable") {
+    IoContext ctx(1);
+    std::atomic_bool couldConnect = false;
+
+    constexpr const char *address = "nyaio-timed-send-recv.sock";
+    ctx.schedule(timedSendAwaitableTask(ctx, address, couldConnect));
+    ctx.schedule(timedRecvAwaitableTask(address, couldConnect));
+
+    ctx.run();
+    ::unlink(address);
+}
+
+namespace {
+
 auto sendtoAwaitableTask(IoContext &ctx, const char *address,
                          std::atomic_bool &couldConnect) noexcept -> Task<> {
     struct sockaddr_un addr{};

@@ -1863,6 +1863,118 @@ private:
     int m_flags;
 };
 
+/// @class TimedSendAwaitable
+/// @brief
+///   Awaitable object for async send operation with timeout support.
+class TimedSendAwaitable {
+public:
+    using Self = TimedSendAwaitable;
+
+    /// @brief
+    ///   Create a new @c TimedSendAwaitable for async send operation.
+    /// @param socket
+    ///   The socket to send data to.
+    /// @param data
+    ///   Pointer to start of data to be sent.
+    /// @param size
+    ///   Expected size in byte of data to be sent.
+    /// @param flags
+    ///   Flags for this async send operation. See linux manual for @c send for details.
+    /// @param timeout
+    ///   Timeout for this send operation. Negative values and zero will be considered as never
+    ///   timeout.
+    template <class Rep, class Period>
+        requires(std::ratio_less_equal_v<std::nano, Period>)
+    TimedSendAwaitable(int socket, const void *data, std::uint32_t size, int flags,
+                       std::chrono::duration<Rep, Period> timeout) noexcept
+        : m_promise(), m_socket(socket), m_data(data), m_size(size), m_flags(flags), m_timeout() {
+        auto nano = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
+        if (nano <= 0)
+            return;
+
+        m_timeout.tv_sec  = static_cast<std::uint64_t>(nano) / 1000000000ULL;
+        m_timeout.tv_nsec = static_cast<std::uint64_t>(nano) % 1000000000ULL;
+    }
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async send operation and suspend the coroutine.
+    /// @tparam T
+    ///   Type of promise of current coroutine.
+    /// @param coro
+    ///   Current coroutine handle.
+    template <class T>
+        requires(std::is_base_of_v<detail::PromiseBase, T>)
+    auto await_suspend(std::coroutine_handle<T> coro) noexcept -> void {
+        auto &promise = static_cast<detail::PromiseBase &>(coro.promise());
+        m_promise     = &promise;
+        auto *worker  = promise.worker;
+
+        io_uring_sqe *sqe = worker->pollSubmissionQueueEntry();
+        while (sqe == nullptr) [[unlikely]] {
+            worker->submit();
+            sqe = worker->pollSubmissionQueueEntry();
+        }
+
+        sqe->opcode    = IORING_OP_SEND;
+        sqe->fd        = m_socket;
+        sqe->addr      = reinterpret_cast<std::uintptr_t>(m_data);
+        sqe->len       = m_size;
+        sqe->msg_flags = static_cast<std::uint32_t>(m_flags);
+        sqe->user_data = reinterpret_cast<std::uintptr_t>(&promise);
+
+        // Prepare for timeout.
+        if (m_timeout.tv_sec != 0 || m_timeout.tv_nsec != 0) {
+            io_uring_sqe *timeSqe = worker->pollSubmissionQueueEntry();
+            while (timeSqe == nullptr) [[unlikely]] {
+                worker->submit();
+                timeSqe = worker->pollSubmissionQueueEntry();
+            }
+
+            sqe->flags = IOSQE_IO_LINK;
+
+            // Prepare timeout event.
+            timeSqe->opcode        = IORING_OP_LINK_TIMEOUT;
+            timeSqe->fd            = -1;
+            timeSqe->addr          = reinterpret_cast<std::uintptr_t>(&m_timeout);
+            timeSqe->len           = 1;
+            timeSqe->user_data     = 0;
+            timeSqe->timeout_flags = 0;
+        }
+
+        worker->flushSubmissionQueue();
+    }
+
+    /// @brief
+    ///   Resume this coroutine and get result of the async send operation.
+    /// @return
+    ///   A struct that contains number of bytes sent and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes sent is valid. The return value is
+    ///   @c std::errc::operation_canceled if timeout occured.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> SystemIoResult {
+        if (m_promise->ioResult < 0) [[unlikely]]
+            return {0, std::errc{-m_promise->ioResult}};
+        return {static_cast<std::uint32_t>(m_promise->ioResult), std::errc{}};
+    }
+
+private:
+    detail::PromiseBase *m_promise;
+    int m_socket;
+    const void *m_data;
+    std::uint32_t m_size;
+    int m_flags;
+    __kernel_timespec m_timeout;
+};
+
 /// @class ReceiveAwaitable
 /// @brief
 ///   Awaitable object for async recv operation.
@@ -1939,6 +2051,119 @@ private:
     void *m_buffer;
     std::uint32_t m_size;
     int m_flags;
+};
+
+/// @class TimedReceiveAwaitable
+/// @brief
+///   Awaitable object for async recv operation with timeout support.
+class TimedReceiveAwaitable {
+public:
+    using Self = TimedReceiveAwaitable;
+
+    /// @brief
+    ///   Create a new @c TimedReceiveAwaitable for async recv operation.
+    /// @param socket
+    ///   The socket to receive data from.
+    /// @param[out] buffer
+    ///   Pointer to start of buffer to store data received from the socket.
+    /// @param size
+    ///   Maximum available size in byte of @c buffer.
+    /// @param flags
+    ///   Flags for this async recv operation. See linux manual for @c recv for details.
+    /// @param timeout
+    ///   Timeout for this receive operation. Negative values and zero will be considered as never
+    ///   timeout.
+    template <class Rep, class Period>
+        requires(std::ratio_less_equal_v<std::nano, Period>)
+    TimedReceiveAwaitable(int socket, void *buffer, std::uint32_t size, int flags,
+                          std::chrono::duration<Rep, Period> timeout) noexcept
+        : m_promise(), m_socket(socket), m_buffer(buffer), m_size(size), m_flags(flags),
+          m_timeout() {
+        auto nano = std::chrono::duration_cast<std::chrono::nanoseconds>(timeout).count();
+        if (nano <= 0)
+            return;
+
+        m_timeout.tv_sec  = static_cast<std::uint64_t>(nano) / 1000000000ULL;
+        m_timeout.tv_nsec = static_cast<std::uint64_t>(nano) % 1000000000ULL;
+    }
+
+    /// @brief
+    ///   C++20 coroutine API method. Always execute @c await_suspend().
+    /// @return
+    ///   This function always returns @c false.
+    [[nodiscard]]
+    static constexpr auto await_ready() noexcept -> bool {
+        return false;
+    }
+
+    /// @brief
+    ///   Prepare for async recv operation and suspend the coroutine.
+    /// @tparam T
+    ///   Type of promise of current coroutine.
+    /// @param coro
+    ///   Current coroutine handle.
+    template <class T>
+        requires(std::is_base_of_v<detail::PromiseBase, T>)
+    auto await_suspend(std::coroutine_handle<T> coro) noexcept -> void {
+        auto &promise = static_cast<detail::PromiseBase &>(coro.promise());
+        m_promise     = &promise;
+        auto *worker  = promise.worker;
+
+        io_uring_sqe *sqe = worker->pollSubmissionQueueEntry();
+        while (sqe == nullptr) [[unlikely]] {
+            worker->submit();
+            sqe = worker->pollSubmissionQueueEntry();
+        }
+
+        sqe->opcode    = IORING_OP_RECV;
+        sqe->fd        = m_socket;
+        sqe->addr      = reinterpret_cast<std::uintptr_t>(m_buffer);
+        sqe->len       = m_size;
+        sqe->msg_flags = static_cast<std::uint32_t>(m_flags);
+        sqe->user_data = reinterpret_cast<std::uintptr_t>(&promise);
+
+        // Prepare for timeout.
+        if (m_timeout.tv_sec != 0 || m_timeout.tv_nsec != 0) {
+            io_uring_sqe *timeSqe = worker->pollSubmissionQueueEntry();
+            while (timeSqe == nullptr) [[unlikely]] {
+                worker->submit();
+                timeSqe = worker->pollSubmissionQueueEntry();
+            }
+
+            sqe->flags = IOSQE_IO_LINK;
+
+            // Prepare timeout event.
+            timeSqe->opcode        = IORING_OP_LINK_TIMEOUT;
+            timeSqe->fd            = -1;
+            timeSqe->addr          = reinterpret_cast<std::uintptr_t>(&m_timeout);
+            timeSqe->len           = 1;
+            timeSqe->user_data     = 0;
+            timeSqe->timeout_flags = 0;
+        }
+
+        worker->flushSubmissionQueue();
+    }
+
+    /// @brief
+    ///   Resume this coroutine and get result of the async recv operation.
+    /// @return
+    ///   A struct that contains number of bytes received and an error code. The error code is
+    ///   @c std::errc{} if succeeded and the number of bytes received is valid. The return value is
+    ///   @c std::errc::operation_canceled if timeout occured.
+    [[nodiscard]]
+    auto await_resume() const noexcept -> SystemIoResult {
+        if (m_promise->ioResult < 0) [[unlikely]]
+            return {0, std::errc{-m_promise->ioResult}};
+        return {static_cast<std::uint32_t>(m_promise->ioResult), std::errc{}};
+    }
+
+private:
+    detail::PromiseBase *m_promise;
+    int m_socket;
+    void *m_buffer;
+    std::uint32_t m_size;
+    int m_flags;
+    __kernel_timespec m_timeout;
 };
 
 /// @class SendToAwaitable
